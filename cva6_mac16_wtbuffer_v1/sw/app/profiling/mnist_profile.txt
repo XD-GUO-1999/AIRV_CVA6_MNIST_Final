@@ -1,0 +1,469 @@
+Flat profile:
+
+Each sample counts as 0.01 seconds.
+ no time accumulated
+
+  %   cumulative   self              self     total           
+ time   seconds   seconds    calls  Ts/call  Ts/call  name    
+  0.00      0.00     0.00    14672     0.00     0.00  prof_mac16buf
+  0.00      0.00     0.00     2480     0.00     0.00  clamp
+  0.00      0.00     0.00     2480     0.00     0.00  sat
+  0.00      0.00     0.00     2480     0.00     0.00  saturate
+  0.00      0.00     0.00     1800     0.00     0.00  mac16buf_conv1_wbuf
+  0.00      0.00     0.00     1725     0.00     0.00  mac16buf_wbuf_middle4
+  0.00      0.00     0.00     1035     0.00     0.00  mac16buf_wbuf_middle
+  0.00      0.00     0.00      864     0.00     0.00  mac16buf_middle4
+  0.00      0.00     0.00      554     0.00     0.00  prof_mac16buf_para
+  0.00      0.00     0.00      379     0.00     0.00  mac16buf_middle
+  0.00      0.00     0.00      345     0.00     0.00  mac16buf_para_wbuf_middle
+  0.00      0.00     0.00      345     0.00     0.00  mac16buf_wbuf_conv2_25blocks
+  0.00      0.00     0.00      345     0.00     0.00  mac16buf_wbuf_final
+  0.00      0.00     0.00      345     0.00     0.00  mac16buf_wbuf_first
+  0.00      0.00     0.00      176     0.00     0.00  mac16buf_final
+  0.00      0.00     0.00      176     0.00     0.00  mac16buf_first
+  0.00      0.00     0.00      149     0.00     0.00  mac16buf_fc1_24blocks
+  0.00      0.00     0.00       65     0.00     0.00  mac16buf_para_conv1_aligned_wbuf
+  0.00      0.00     0.00       55     0.00     0.00  mac16buf_para_conv1_unaligned2_wbuf
+  0.00      0.00     0.00       35     0.00     0.00  mac16buf_middle_offset2
+  0.00      0.00     0.00       32     0.00     0.00  mac16buf_para_middle
+  0.00      0.00     0.00       23     0.00     0.00  mac16buf_conv2_25blocks
+  0.00      0.00     0.00       15     0.00     0.00  mac16buf_conv1
+  0.00      0.00     0.00       15     0.00     0.00  mac16buf_para_wbuf_final
+  0.00      0.00     0.00       15     0.00     0.00  mac16buf_para_wbuf_first
+  0.00      0.00     0.00        5     0.00     0.00  mac16buf_final_offset2
+  0.00      0.00     0.00        5     0.00     0.00  mac16buf_first_offset2
+  0.00      0.00     0.00        5     0.00     0.00  mac16buf_para_middle4
+  0.00      0.00     0.00        4     0.00     0.00  prof_buf4
+  0.00      0.00     0.00        4     0.00     0.00  read_mnist_input
+  0.00      0.00     0.00        3     0.00     0.00  mac16buf_para_final
+  0.00      0.00     0.00        3     0.00     0.00  mac16buf_para_first
+  0.00      0.00     0.00        1     0.00     0.00  buffer4_setmode_conv1
+  0.00      0.00     0.00        1     0.00     0.00  buffer4_setmode_conv2
+  0.00      0.00     0.00        1     0.00     0.00  buffer4_setmode_fc1
+  0.00      0.00     0.00        1     0.00     0.00  buffer4_setmode_fc2
+  0.00      0.00     0.00        1     0.00     0.00  convcellPropagate1
+  0.00      0.00     0.00        1     0.00     0.00  convcellPropagate2
+  0.00      0.00     0.00        1     0.00     0.00  envRead
+  0.00      0.00     0.00        1     0.00     0.00  fccellPropagateDATA_T
+  0.00      0.00     0.00        1     0.00     0.00  fccellPropagateUDATA_T
+  0.00      0.00     0.00        1     0.00     0.00  feof_mnist_input
+  0.00      0.00     0.00        1     0.00     0.00  mac16buf_para_conv1_aligned
+  0.00      0.00     0.00        1     0.00     0.00  maxPropagate1
+  0.00      0.00     0.00        1     0.00     0.00  processInput
+  0.00      0.00     0.00        1     0.00     0.00  propagate
+  0.00      0.00     0.00        1     0.00     0.00  readStimulus
+
+ %         the percentage of the total running time of the
+time       program used by this function.
+
+cumulative a running sum of the number of seconds accounted
+ seconds   for by this function and those listed above it.
+
+ self      the number of seconds accounted for by this
+seconds    function alone.  This is the major sort for this
+           listing.
+
+calls      the number of times this function was invoked, if
+           this function is profiled, else blank.
+
+ self      the average number of milliseconds spent in this
+ms/call    function per call, if this function is profiled,
+	   else blank.
+
+ total     the average number of milliseconds spent in this
+ms/call    function and its descendents per call, if this
+	   function is profiled, else blank.
+
+name       the name of the function.  This is the minor sort
+           for this listing. The index shows the location of
+	   the function in the gprof listing. If the index is
+	   in parenthesis it shows where it would appear in
+	   the gprof listing if it were to be printed.
+
+Copyright (C) 2012-2022 Free Software Foundation, Inc.
+
+Copying and distribution of this file, with or without modification,
+are permitted in any medium without royalty provided the copyright
+notice and this notice are preserved.
+
+		     Call graph (explanation follows)
+
+
+granularity: each sample hit covers 4 byte(s) no time propagated
+
+index % time    self  children    called     name
+                0.00    0.00       5/14672       mac16buf_first_offset2 [27]
+                0.00    0.00       5/14672       mac16buf_final_offset2 [26]
+                0.00    0.00      15/14672       mac16buf_conv1 [23]
+                0.00    0.00      35/14672       mac16buf_middle_offset2 [20]
+                0.00    0.00     176/14672       mac16buf_first [16]
+                0.00    0.00     176/14672       mac16buf_final [15]
+                0.00    0.00     345/14672       mac16buf_wbuf_first [14]
+                0.00    0.00     345/14672       mac16buf_wbuf_final [13]
+                0.00    0.00     379/14672       mac16buf_middle [10]
+                0.00    0.00    1035/14672       mac16buf_wbuf_middle [7]
+                0.00    0.00    1800/14672       mac16buf_conv1_wbuf [5]
+                0.00    0.00    3456/14672       mac16buf_middle4 [8]
+                0.00    0.00    6900/14672       mac16buf_wbuf_middle4 [6]
+[1]      0.0    0.00    0.00   14672         prof_mac16buf [1]
+-----------------------------------------------
+                0.00    0.00    2480/2480        saturate [4]
+[2]      0.0    0.00    0.00    2480         clamp [2]
+-----------------------------------------------
+                0.00    0.00      10/2480        fccellPropagateDATA_T [40]
+                0.00    0.00     150/2480        fccellPropagateUDATA_T [41]
+                0.00    0.00     384/2480        convcellPropagate2 [38]
+                0.00    0.00    1936/2480        convcellPropagate1 [37]
+[3]      0.0    0.00    0.00    2480         sat [3]
+                0.00    0.00    2480/2480        saturate [4]
+-----------------------------------------------
+                0.00    0.00    2480/2480        sat [3]
+[4]      0.0    0.00    0.00    2480         saturate [4]
+                0.00    0.00    2480/2480        clamp [2]
+-----------------------------------------------
+                0.00    0.00    1800/1800        convcellPropagate1 [37]
+[5]      0.0    0.00    0.00    1800         mac16buf_conv1_wbuf [5]
+                0.00    0.00    1800/14672       prof_mac16buf [1]
+-----------------------------------------------
+                0.00    0.00    1725/1725        mac16buf_wbuf_conv2_25blocks [12]
+[6]      0.0    0.00    0.00    1725         mac16buf_wbuf_middle4 [6]
+                0.00    0.00    6900/14672       prof_mac16buf [1]
+-----------------------------------------------
+                0.00    0.00    1035/1035        mac16buf_wbuf_conv2_25blocks [12]
+[7]      0.0    0.00    0.00    1035         mac16buf_wbuf_middle [7]
+                0.00    0.00    1035/14672       prof_mac16buf [1]
+-----------------------------------------------
+                0.00    0.00       4/864         fccellPropagateDATA_T [40]
+                0.00    0.00     115/864         mac16buf_conv2_25blocks [22]
+                0.00    0.00     745/864         mac16buf_fc1_24blocks [17]
+[8]      0.0    0.00    0.00     864         mac16buf_middle4 [8]
+                0.00    0.00    3456/14672       prof_mac16buf [1]
+-----------------------------------------------
+                0.00    0.00       1/554         mac16buf_para_conv1_aligned [43]
+                0.00    0.00       3/554         mac16buf_para_first [32]
+                0.00    0.00       3/554         mac16buf_para_final [31]
+                0.00    0.00      15/554         mac16buf_para_wbuf_first [25]
+                0.00    0.00      15/554         mac16buf_para_wbuf_final [24]
+                0.00    0.00      20/554         mac16buf_para_middle4 [28]
+                0.00    0.00      32/554         mac16buf_para_middle [21]
+                0.00    0.00      55/554         mac16buf_para_conv1_unaligned2_wbuf [19]
+                0.00    0.00      65/554         mac16buf_para_conv1_aligned_wbuf [18]
+                0.00    0.00     345/554         mac16buf_para_wbuf_middle [11]
+[9]      0.0    0.00    0.00     554         prof_mac16buf_para [9]
+-----------------------------------------------
+                0.00    0.00      12/379         fccellPropagateDATA_T [40]
+                0.00    0.00      69/379         mac16buf_conv2_25blocks [22]
+                0.00    0.00     298/379         mac16buf_fc1_24blocks [17]
+[10]     0.0    0.00    0.00     379         mac16buf_middle [10]
+                0.00    0.00     379/14672       prof_mac16buf [1]
+-----------------------------------------------
+                0.00    0.00     345/345         convcellPropagate2 [38]
+[11]     0.0    0.00    0.00     345         mac16buf_para_wbuf_middle [11]
+                0.00    0.00     345/554         prof_mac16buf_para [9]
+-----------------------------------------------
+                0.00    0.00     345/345         convcellPropagate2 [38]
+[12]     0.0    0.00    0.00     345         mac16buf_wbuf_conv2_25blocks [12]
+                0.00    0.00    1725/1725        mac16buf_wbuf_middle4 [6]
+                0.00    0.00    1035/1035        mac16buf_wbuf_middle [7]
+                0.00    0.00     345/345         mac16buf_wbuf_first [14]
+                0.00    0.00     345/345         mac16buf_wbuf_final [13]
+-----------------------------------------------
+                0.00    0.00     345/345         mac16buf_wbuf_conv2_25blocks [12]
+[13]     0.0    0.00    0.00     345         mac16buf_wbuf_final [13]
+                0.00    0.00     345/14672       prof_mac16buf [1]
+-----------------------------------------------
+                0.00    0.00     345/345         mac16buf_wbuf_conv2_25blocks [12]
+[14]     0.0    0.00    0.00     345         mac16buf_wbuf_first [14]
+                0.00    0.00     345/14672       prof_mac16buf [1]
+-----------------------------------------------
+                0.00    0.00       4/176         fccellPropagateDATA_T [40]
+                0.00    0.00      23/176         mac16buf_conv2_25blocks [22]
+                0.00    0.00     149/176         mac16buf_fc1_24blocks [17]
+[15]     0.0    0.00    0.00     176         mac16buf_final [15]
+                0.00    0.00     176/14672       prof_mac16buf [1]
+-----------------------------------------------
+                0.00    0.00       4/176         fccellPropagateDATA_T [40]
+                0.00    0.00      23/176         mac16buf_conv2_25blocks [22]
+                0.00    0.00     149/176         mac16buf_fc1_24blocks [17]
+[16]     0.0    0.00    0.00     176         mac16buf_first [16]
+                0.00    0.00     176/14672       prof_mac16buf [1]
+-----------------------------------------------
+                0.00    0.00     149/149         fccellPropagateUDATA_T [41]
+[17]     0.0    0.00    0.00     149         mac16buf_fc1_24blocks [17]
+                0.00    0.00     745/864         mac16buf_middle4 [8]
+                0.00    0.00     298/379         mac16buf_middle [10]
+                0.00    0.00     149/176         mac16buf_first [16]
+                0.00    0.00     149/176         mac16buf_final [15]
+-----------------------------------------------
+                0.00    0.00      65/65          convcellPropagate1 [37]
+[18]     0.0    0.00    0.00      65         mac16buf_para_conv1_aligned_wbuf [18]
+                0.00    0.00      65/554         prof_mac16buf_para [9]
+-----------------------------------------------
+                0.00    0.00      55/55          convcellPropagate1 [37]
+[19]     0.0    0.00    0.00      55         mac16buf_para_conv1_unaligned2_wbuf [19]
+                0.00    0.00      55/554         prof_mac16buf_para [9]
+-----------------------------------------------
+                0.00    0.00      35/35          fccellPropagateDATA_T [40]
+[20]     0.0    0.00    0.00      35         mac16buf_middle_offset2 [20]
+                0.00    0.00      35/14672       prof_mac16buf [1]
+-----------------------------------------------
+                0.00    0.00       2/32          fccellPropagateUDATA_T [41]
+                0.00    0.00       7/32          fccellPropagateDATA_T [40]
+                0.00    0.00      23/32          convcellPropagate2 [38]
+[21]     0.0    0.00    0.00      32         mac16buf_para_middle [21]
+                0.00    0.00      32/554         prof_mac16buf_para [9]
+-----------------------------------------------
+                0.00    0.00      23/23          convcellPropagate2 [38]
+[22]     0.0    0.00    0.00      23         mac16buf_conv2_25blocks [22]
+                0.00    0.00     115/864         mac16buf_middle4 [8]
+                0.00    0.00      69/379         mac16buf_middle [10]
+                0.00    0.00      23/176         mac16buf_first [16]
+                0.00    0.00      23/176         mac16buf_final [15]
+-----------------------------------------------
+                0.00    0.00      15/15          convcellPropagate1 [37]
+[23]     0.0    0.00    0.00      15         mac16buf_conv1 [23]
+                0.00    0.00      15/14672       prof_mac16buf [1]
+-----------------------------------------------
+                0.00    0.00      15/15          convcellPropagate2 [38]
+[24]     0.0    0.00    0.00      15         mac16buf_para_wbuf_final [24]
+                0.00    0.00      15/554         prof_mac16buf_para [9]
+-----------------------------------------------
+                0.00    0.00      15/15          convcellPropagate2 [38]
+[25]     0.0    0.00    0.00      15         mac16buf_para_wbuf_first [25]
+                0.00    0.00      15/554         prof_mac16buf_para [9]
+-----------------------------------------------
+                0.00    0.00       5/5           fccellPropagateDATA_T [40]
+[26]     0.0    0.00    0.00       5         mac16buf_final_offset2 [26]
+                0.00    0.00       5/14672       prof_mac16buf [1]
+-----------------------------------------------
+                0.00    0.00       5/5           fccellPropagateDATA_T [40]
+[27]     0.0    0.00    0.00       5         mac16buf_first_offset2 [27]
+                0.00    0.00       5/14672       prof_mac16buf [1]
+-----------------------------------------------
+                0.00    0.00       5/5           fccellPropagateUDATA_T [41]
+[28]     0.0    0.00    0.00       5         mac16buf_para_middle4 [28]
+                0.00    0.00      20/554         prof_mac16buf_para [9]
+-----------------------------------------------
+                0.00    0.00       1/4           buffer4_setmode_conv1 [33]
+                0.00    0.00       1/4           buffer4_setmode_conv2 [34]
+                0.00    0.00       1/4           buffer4_setmode_fc1 [35]
+                0.00    0.00       1/4           buffer4_setmode_fc2 [36]
+[29]     0.0    0.00    0.00       4         prof_buf4 [29]
+-----------------------------------------------
+                0.00    0.00       4/4           envRead [39]
+[30]     0.0    0.00    0.00       4         read_mnist_input [30]
+-----------------------------------------------
+                0.00    0.00       1/3           convcellPropagate2 [38]
+                0.00    0.00       1/3           fccellPropagateUDATA_T [41]
+                0.00    0.00       1/3           fccellPropagateDATA_T [40]
+[31]     0.0    0.00    0.00       3         mac16buf_para_final [31]
+                0.00    0.00       3/554         prof_mac16buf_para [9]
+-----------------------------------------------
+                0.00    0.00       1/3           convcellPropagate2 [38]
+                0.00    0.00       1/3           fccellPropagateUDATA_T [41]
+                0.00    0.00       1/3           fccellPropagateDATA_T [40]
+[32]     0.0    0.00    0.00       3         mac16buf_para_first [32]
+                0.00    0.00       3/554         prof_mac16buf_para [9]
+-----------------------------------------------
+                0.00    0.00       1/1           convcellPropagate1 [37]
+[33]     0.0    0.00    0.00       1         buffer4_setmode_conv1 [33]
+                0.00    0.00       1/4           prof_buf4 [29]
+-----------------------------------------------
+                0.00    0.00       1/1           convcellPropagate2 [38]
+[34]     0.0    0.00    0.00       1         buffer4_setmode_conv2 [34]
+                0.00    0.00       1/4           prof_buf4 [29]
+-----------------------------------------------
+                0.00    0.00       1/1           fccellPropagateUDATA_T [41]
+[35]     0.0    0.00    0.00       1         buffer4_setmode_fc1 [35]
+                0.00    0.00       1/4           prof_buf4 [29]
+-----------------------------------------------
+                0.00    0.00       1/1           fccellPropagateDATA_T [40]
+[36]     0.0    0.00    0.00       1         buffer4_setmode_fc2 [36]
+                0.00    0.00       1/4           prof_buf4 [29]
+-----------------------------------------------
+                0.00    0.00       1/1           propagate [46]
+[37]     0.0    0.00    0.00       1         convcellPropagate1 [37]
+                0.00    0.00    1936/2480        sat [3]
+                0.00    0.00    1800/1800        mac16buf_conv1_wbuf [5]
+                0.00    0.00      65/65          mac16buf_para_conv1_aligned_wbuf [18]
+                0.00    0.00      55/55          mac16buf_para_conv1_unaligned2_wbuf [19]
+                0.00    0.00      15/15          mac16buf_conv1 [23]
+                0.00    0.00       1/1           buffer4_setmode_conv1 [33]
+                0.00    0.00       1/1           mac16buf_para_conv1_aligned [43]
+-----------------------------------------------
+                0.00    0.00       1/1           propagate [46]
+[38]     0.0    0.00    0.00       1         convcellPropagate2 [38]
+                0.00    0.00     384/2480        sat [3]
+                0.00    0.00     345/345         mac16buf_para_wbuf_middle [11]
+                0.00    0.00     345/345         mac16buf_wbuf_conv2_25blocks [12]
+                0.00    0.00      23/32          mac16buf_para_middle [21]
+                0.00    0.00      23/23          mac16buf_conv2_25blocks [22]
+                0.00    0.00      15/15          mac16buf_para_wbuf_first [25]
+                0.00    0.00      15/15          mac16buf_para_wbuf_final [24]
+                0.00    0.00       1/1           buffer4_setmode_conv2 [34]
+                0.00    0.00       1/3           mac16buf_para_first [32]
+                0.00    0.00       1/3           mac16buf_para_final [31]
+-----------------------------------------------
+                0.00    0.00       1/1           readStimulus [47]
+[39]     0.0    0.00    0.00       1         envRead [39]
+                0.00    0.00       4/4           read_mnist_input [30]
+                0.00    0.00       1/1           feof_mnist_input [42]
+-----------------------------------------------
+                0.00    0.00       1/1           propagate [46]
+[40]     0.0    0.00    0.00       1         fccellPropagateDATA_T [40]
+                0.00    0.00      35/35          mac16buf_middle_offset2 [20]
+                0.00    0.00      12/379         mac16buf_middle [10]
+                0.00    0.00      10/2480        sat [3]
+                0.00    0.00       7/32          mac16buf_para_middle [21]
+                0.00    0.00       5/5           mac16buf_first_offset2 [27]
+                0.00    0.00       5/5           mac16buf_final_offset2 [26]
+                0.00    0.00       4/176         mac16buf_first [16]
+                0.00    0.00       4/864         mac16buf_middle4 [8]
+                0.00    0.00       4/176         mac16buf_final [15]
+                0.00    0.00       1/1           buffer4_setmode_fc2 [36]
+                0.00    0.00       1/3           mac16buf_para_first [32]
+                0.00    0.00       1/3           mac16buf_para_final [31]
+-----------------------------------------------
+                0.00    0.00       1/1           propagate [46]
+[41]     0.0    0.00    0.00       1         fccellPropagateUDATA_T [41]
+                0.00    0.00     150/2480        sat [3]
+                0.00    0.00     149/149         mac16buf_fc1_24blocks [17]
+                0.00    0.00       5/5           mac16buf_para_middle4 [28]
+                0.00    0.00       2/32          mac16buf_para_middle [21]
+                0.00    0.00       1/1           buffer4_setmode_fc1 [35]
+                0.00    0.00       1/3           mac16buf_para_first [32]
+                0.00    0.00       1/3           mac16buf_para_final [31]
+-----------------------------------------------
+                0.00    0.00       1/1           envRead [39]
+[42]     0.0    0.00    0.00       1         feof_mnist_input [42]
+-----------------------------------------------
+                0.00    0.00       1/1           convcellPropagate1 [37]
+[43]     0.0    0.00    0.00       1         mac16buf_para_conv1_aligned [43]
+                0.00    0.00       1/554         prof_mac16buf_para [9]
+-----------------------------------------------
+                0.00    0.00       1/1           propagate [46]
+[44]     0.0    0.00    0.00       1         maxPropagate1 [44]
+-----------------------------------------------
+                0.00    0.00       1/1           main [58]
+[45]     0.0    0.00    0.00       1         processInput [45]
+                0.00    0.00       1/1           propagate [46]
+-----------------------------------------------
+                0.00    0.00       1/1           processInput [45]
+[46]     0.0    0.00    0.00       1         propagate [46]
+                0.00    0.00       1/1           convcellPropagate1 [37]
+                0.00    0.00       1/1           convcellPropagate2 [38]
+                0.00    0.00       1/1           fccellPropagateUDATA_T [41]
+                0.00    0.00       1/1           fccellPropagateDATA_T [40]
+                0.00    0.00       1/1           maxPropagate1 [44]
+-----------------------------------------------
+                0.00    0.00       1/1           main [58]
+[47]     0.0    0.00    0.00       1         readStimulus [47]
+                0.00    0.00       1/1           envRead [39]
+-----------------------------------------------
+
+ This table describes the call tree of the program, and was sorted by
+ the total amount of time spent in each function and its children.
+
+ Each entry in this table consists of several lines.  The line with the
+ index number at the left hand margin lists the current function.
+ The lines above it list the functions that called this function,
+ and the lines below it list the functions this one called.
+ This line lists:
+     index	A unique number given to each element of the table.
+		Index numbers are sorted numerically.
+		The index number is printed next to every function name so
+		it is easier to look up where the function is in the table.
+
+     % time	This is the percentage of the `total' time that was spent
+		in this function and its children.  Note that due to
+		different viewpoints, functions excluded by options, etc,
+		these numbers will NOT add up to 100%.
+
+     self	This is the total amount of time spent in this function.
+
+     children	This is the total amount of time propagated into this
+		function by its children.
+
+     called	This is the number of times the function was called.
+		If the function called itself recursively, the number
+		only includes non-recursive calls, and is followed by
+		a `+' and the number of recursive calls.
+
+     name	The name of the current function.  The index number is
+		printed after it.  If the function is a member of a
+		cycle, the cycle number is printed between the
+		function's name and the index number.
+
+
+ For the function's parents, the fields have the following meanings:
+
+     self	This is the amount of time that was propagated directly
+		from the function into this parent.
+
+     children	This is the amount of time that was propagated from
+		the function's children into this parent.
+
+     called	This is the number of times this parent called the
+		function `/' the total number of times the function
+		was called.  Recursive calls to the function are not
+		included in the number after the `/'.
+
+     name	This is the name of the parent.  The parent's index
+		number is printed after it.  If the parent is a
+		member of a cycle, the cycle number is printed between
+		the name and the index number.
+
+ If the parents of the function cannot be determined, the word
+ `<spontaneous>' is printed in the `name' field, and all the other
+ fields are blank.
+
+ For the function's children, the fields have the following meanings:
+
+     self	This is the amount of time that was propagated directly
+		from the child into the function.
+
+     children	This is the amount of time that was propagated from the
+		child's children to the function.
+
+     called	This is the number of times the function called
+		this child `/' the total number of times the child
+		was called.  Recursive calls by the child are not
+		listed in the number after the `/'.
+
+     name	This is the name of the child.  The child's index
+		number is printed after it.  If the child is a
+		member of a cycle, the cycle number is printed
+		between the name and the index number.
+
+ If there are any cycles (circles) in the call graph, there is an
+ entry for the cycle-as-a-whole.  This entry shows who called the
+ cycle (as parents) and the members of the cycle (as children.)
+ The `+' recursive calls entry shows the number of function calls that
+ were internal to the cycle, and the calls entry for each member shows,
+ for that member, how many times it was called from other members of
+ the cycle.
+
+Copyright (C) 2012-2022 Free Software Foundation, Inc.
+
+Copying and distribution of this file, with or without modification,
+are permitted in any medium without royalty provided the copyright
+notice and this notice are preserved.
+
+Index by function name
+
+  [33] buffer4_setmode_conv1 (NetworkPropagate.c) [26] mac16buf_final_offset2 (NetworkPropagate.c) [12] mac16buf_wbuf_conv2_25blocks (NetworkPropagate.c)
+  [34] buffer4_setmode_conv2 (NetworkPropagate.c) [16] mac16buf_first (NetworkPropagate.c) [13] mac16buf_wbuf_final (NetworkPropagate.c)
+  [35] buffer4_setmode_fc1 (NetworkPropagate.c) [27] mac16buf_first_offset2 (NetworkPropagate.c) [14] mac16buf_wbuf_first (NetworkPropagate.c)
+  [36] buffer4_setmode_fc2 (NetworkPropagate.c) [10] mac16buf_middle (NetworkPropagate.c) [7] mac16buf_wbuf_middle (NetworkPropagate.c)
+   [2] clamp (NetworkPropagate.c) [8] mac16buf_middle4 (NetworkPropagate.c) [6] mac16buf_wbuf_middle4 (NetworkPropagate.c)
+  [37] convcellPropagate1 (NetworkPropagate.c) [20] mac16buf_middle_offset2 (NetworkPropagate.c) [44] maxPropagate1 (NetworkPropagate.c)
+  [38] convcellPropagate2 (NetworkPropagate.c) [43] mac16buf_para_conv1_aligned (NetworkPropagate.c) [45] processInput
+  [39] envRead                [18] mac16buf_para_conv1_aligned_wbuf (NetworkPropagate.c) [29] prof_buf4 (NetworkPropagate.c)
+  [40] fccellPropagateDATA_T (NetworkPropagate.c) [19] mac16buf_para_conv1_unaligned2_wbuf (NetworkPropagate.c) [1] prof_mac16buf (NetworkPropagate.c)
+  [41] fccellPropagateUDATA_T (NetworkPropagate.c) [31] mac16buf_para_final (NetworkPropagate.c) [9] prof_mac16buf_para (NetworkPropagate.c)
+  [42] feof_mnist_input (cpp_utils.c) [32] mac16buf_para_first (NetworkPropagate.c) [46] propagate
+  [23] mac16buf_conv1 (NetworkPropagate.c) [21] mac16buf_para_middle (NetworkPropagate.c) [47] readStimulus
+   [5] mac16buf_conv1_wbuf (NetworkPropagate.c) [28] mac16buf_para_middle4 (NetworkPropagate.c) [30] read_mnist_input (cpp_utils.c)
+  [22] mac16buf_conv2_25blocks (NetworkPropagate.c) [24] mac16buf_para_wbuf_final (NetworkPropagate.c) [3] sat (NetworkPropagate.c)
+  [17] mac16buf_fc1_24blocks (NetworkPropagate.c) [25] mac16buf_para_wbuf_first (NetworkPropagate.c) [4] saturate (NetworkPropagate.c)
+  [15] mac16buf_final (NetworkPropagate.c) [11] mac16buf_para_wbuf_middle (NetworkPropagate.c)

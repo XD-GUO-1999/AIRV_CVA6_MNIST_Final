@@ -1,0 +1,7 @@
++=======================+=======================+=================================================================================+
+| Launch Setup Clock    | Launch Hold Clock     | Pin                                                                             |
++=======================+=======================+=================================================================================+
+| clk_out1_xlnx_clk_gen | clk_out1_xlnx_clk_gen | i_ariane/i_cva6/i_frontend/i_instr_queue/i_fifo_address/read_pointer_q_reg[1]/D |
+| clk_out1_xlnx_clk_gen | clk_out1_xlnx_clk_gen | i_ariane/i_cva6/i_frontend/i_instr_queue/i_fifo_address/status_cnt_q_reg[1]/D   |
+| clk_out1_xlnx_clk_gen | clk_out1_xlnx_clk_gen | i_ariane/i_cva6/i_frontend/i_instr_queue/i_fifo_address/status_cnt_q_reg[0]/D   |
++-----------------------+-----------------------+---------------------------------------------------------------------------------+
