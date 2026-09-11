@@ -47,3 +47,5 @@ Bender.lock
 /tools/
 /util/gcc-toolchain-builder/src/
 /util/gcc-toolchain-builder/build/
+/util/gcc-toolchain-builder/riscv_toolchain/
+
