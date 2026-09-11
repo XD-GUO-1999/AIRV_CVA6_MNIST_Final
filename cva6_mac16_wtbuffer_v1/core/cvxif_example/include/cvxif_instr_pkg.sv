@@ -7,6 +7,9 @@
 //
 // Original Author: Guillaume Chauvon (guillaume.chauvon@thalesgroup.com)
 
+// Final accelerator instruction table.  Only the 7-bit custom opcode is
+// masked for these three entries; the remaining instruction fields are free to
+// carry rd, rs1, rs2 and the two extra weight-register addresses.
 package cvxif_instr_pkg;
 
   typedef struct packed {
@@ -15,11 +18,12 @@ package cvxif_instr_pkg;
     cvxif_pkg::x_issue_resp_t resp;
   } copro_issue_resp_t;
 
-  // 2 Possible RISCV instructions for Coprocessor
+  // Custom instructions accepted by the MNIST accelerator coprocessor.
+  // Only opcode[6:0] is matched; the remaining fields carry register indices.
   parameter int unsigned NbInstr = 3;
   parameter copro_issue_resp_t CoproInstr[NbInstr] = '{
       '{
-          instr: 32'b00000_00_00000_00000_0_00_00000_0101011,  // custom1 opcode buf4
+          instr: 32'b00000_00_00000_00000_0_00_00000_0101011,  // custom-1: BUF4
           mask: 32'b00000_00_00000_00000_0_00_00000_1111111,
           resp : '{
               accept : 1'b1,
@@ -31,7 +35,7 @@ package cvxif_instr_pkg;
           }
       },
       '{
-          instr: 32'b00000_00_00000_00000_0_00_00000_0001011,  // custom0 opcode mac16buf
+          instr: 32'b00000_00_00000_00000_0_00_00000_0001011,  // custom-0: MAC16BUF
           mask: 32'b00000_00_00000_00000_0_00_00000_1111111,
           resp : '{
               accept : 1'b1,
@@ -43,7 +47,7 @@ package cvxif_instr_pkg;
           }
         },
         '{
-          instr: 32'b00000_00_00000_00000_0_00_00000_1011011,  // custom2 opcode mac16buf_para
+          instr: 32'b00000_00_00000_00000_0_00_00000_1011011,  // custom-2: MAC16BUF_PARA
           mask: 32'b00000_00_00000_00000_0_00_00000_1111111,
           resp : '{
               accept : 1'b1,

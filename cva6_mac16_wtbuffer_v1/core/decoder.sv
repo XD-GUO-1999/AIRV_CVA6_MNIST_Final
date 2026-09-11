@@ -8,15 +8,16 @@
 // CONDITIONS OF ANY KIND, either express or implied. See the License for the
 // specific language governing permissions and limitations under the License.
 //
-// File:   issue_read_operands.sv
+// File:   decoder.sv
 // Author: Florian Zaruba <zarubaf@ethz.ch>
 // Date:   8.4.2017
 //
 // Copyright (C) 2017 ETH Zurich, University of Bologna
 // All rights reserved.
 //
-// Description: Issues instruction from the scoreboard and fetches the operands
-//              This also includes all the forwarding logic
+// Description: Decodes CVA6 instructions.  The final MNIST accelerator adds
+//              three custom opcodes routed to CV-X-IF and reuses the RS3 result
+//              path to transport two additional GPR source-register addresses.
 //
 
 module decoder
@@ -1186,38 +1187,50 @@ module decoder
           instruction_o.fu      = ALU;
           instruction_o.rd[4:0] = instr.utype.rd;
         end
-// modification: custom MAC16BUF/BUF4 instruction decoding
+        // ------------------------------------------------------------------
+        // MNIST accelerator custom instructions
+        // ------------------------------------------------------------------
+        //
+        // Custom encoding:
+        //   [31:27] : extra source-register address 2
+        //   [26:22] : extra source-register address 1
+        //   [21:17] : rs2
+        //   [16:12] : rs1
+        //   [11:7]  : rd
+        //   [6:0]   : custom opcode
+        //
+        // The two extra source-register addresses are packed into
+        // instruction_o.result[9:0] by the RS3 selection path below:
+        //   result[4:0] = instruction[26:22]
+        //   result[9:5] = instruction[31:27]
+        // They are later decoded as the third and fourth weight-word registers.
+        // For MAC16BUF_PARA, x28-x31 provide the four input words separately.
         7'b0001011: begin
-          imm_select             = RS3; // modification: use RS3 as the accumulator operand source
-          instruction_o.fu       = CVXIF;            // Dispatch to the accelerator interface
-          instruction_o.rs1[4:0] = instruction_i[16:12]; // Source register 1 (t1)
-          instruction_o.rs2[4:0] = instruction_i[21:17]; // Source register 2 (t2)
-          instruction_o.rd[4:0]  = instr.rtype.rd;      // Destination register (sum)
-          instruction_o.op       = ariane_pkg::MAC16BUF;  // Identify the MAC16BUF operation
-          //instruction_o.result = {54'b0, instruction_i[31:27], instruction_i[26:22]}; // Add immediate info if needed
+          imm_select             = RS3;
+          instruction_o.fu       = CVXIF;
+          instruction_o.rs1[4:0] = instruction_i[16:12];
+          instruction_o.rs2[4:0] = instruction_i[21:17];
+          instruction_o.rd[4:0]  = instr.rtype.rd;
+          instruction_o.op       = ariane_pkg::MAC16BUF;
         end
 
         7'b0101011: begin
-          imm_select             = RS3; // modification: use RS3 as the accumulator operand source
-          instruction_o.fu       = CVXIF;            // Dispatch to the accelerator interface
-          instruction_o.rs1[4:0] = instruction_i[16:12]; // Source register 1 (t1)
-          instruction_o.rs2[4:0] = instruction_i[21:17]; // Source register 2 (t2)
-          instruction_o.rd[4:0]  = instr.rtype.rd;      // Destination register (sum)
-          instruction_o.op       = ariane_pkg::BUF4;     // Identify the BUF4 operation
-          //instruction_o.result = {54'b0, instruction_i[31:27], instruction_i[26:22]}; // Add immediate info if needed
+          imm_select             = RS3;
+          instruction_o.fu       = CVXIF;
+          instruction_o.rs1[4:0] = instruction_i[16:12];
+          instruction_o.rs2[4:0] = instruction_i[21:17];
+          instruction_o.rd[4:0]  = instr.rtype.rd;
+          instruction_o.op       = ariane_pkg::BUF4;
         end
 
         7'b1011011: begin
-          imm_select             = RS3; // modification: use RS3 as the accumulator operand source
-          instruction_o.fu       = CVXIF;            // Dispatch to the accelerator interface
-          instruction_o.rs1[4:0] = instruction_i[16:12]; // Source register 1 (t1)
-          instruction_o.rs2[4:0] = instruction_i[21:17]; // Source register 2 (t2)
-          instruction_o.rd[4:0]  = instr.rtype.rd;      // Destination register (sum)
-          instruction_o.op       = ariane_pkg::MAC16BUF_PARA;     // Identify the BUF4 operation
-          //instruction_o.result = {54'b0, instruction_i[31:27], instruction_i[26:22]}; // Add immediate info if needed
+          imm_select             = RS3;
+          instruction_o.fu       = CVXIF;
+          instruction_o.rs1[4:0] = instruction_i[16:12];
+          instruction_o.rs2[4:0] = instruction_i[21:17];
+          instruction_o.rd[4:0]  = instr.rtype.rd;
+          instruction_o.op       = ariane_pkg::MAC16BUF_PARA;
         end
-
-        // modification: end custom MAC16BUF/BUF4 decode entries
         default: illegal_instr = 1'b1;
       endcase
     end
@@ -1297,12 +1310,16 @@ module decoder
         instruction_o.result  = imm_uj_type;
         instruction_o.use_imm = 1'b1;
       end
-      RS3: begin // modification: RS3 is used as an immediate source for MAC16BUF/BUF4/MAC16BUF_PARA instructions
-      // Pass the appropriate value in result; non-accelerator cases use the RS3 register address.
-        if (instruction_o.op == ariane_pkg::MAC16BUF || instruction_o.op == ariane_pkg::BUF4 || instruction_o.op == ariane_pkg::MAC16BUF_PARA) begin
-          instruction_o.result  = {{riscv::XLEN - 10{1'b0}}, instruction_i[31:27], instruction_i[26:22]}; // Result holds the 10-bit immediate for MAC8EX
+      RS3: begin
+        // Accelerator instructions reuse this path to carry two additional
+        // 5-bit source-register addresses in result[9:0]. Other instructions
+        // keep the original RS3 register-address behavior.
+        if (instruction_o.op == ariane_pkg::MAC16BUF
+            || instruction_o.op == ariane_pkg::BUF4
+            || instruction_o.op == ariane_pkg::MAC16BUF_PARA) begin
+          instruction_o.result  = {{riscv::XLEN - 10{1'b0}}, instruction_i[31:27], instruction_i[26:22]};
         end else begin
-          // Result holds address of FP operand RS3
+          // result holds the address of FP operand RS3
           instruction_o.result  = {{riscv::XLEN - 5{1'b0}}, instr.r4type.rs3};
         end
         instruction_o.use_imm = 1'b0;

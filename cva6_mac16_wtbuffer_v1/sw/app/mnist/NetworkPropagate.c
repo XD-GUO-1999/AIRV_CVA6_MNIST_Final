@@ -10,6 +10,56 @@
 #include "fc2.h"
 
 
+/*
+ * ============================================================================
+ * Final CVA6 MNIST accelerator software path
+ * ============================================================================
+ *
+ * This file is the software side of the final accelerator implementation.  The
+ * optimized path uses three custom instructions and three hardware mechanisms:
+ *
+ *   BUF4
+ *     Configures the number of active 16-byte blocks used by the current layer.
+ *     The rd field encodes active_blocks - 1.
+ *
+ *   MAC16BUF_PARA
+ *     Performs one 16-element INT8 MAC while the four 32-bit input words are
+ *     supplied by the CPU.  The same input words are written into the hardware
+ *     input buffer, so computation and buffer filling happen at the same time.
+ *
+ *   MAC16BUF
+ *     Performs the same 16-element INT8 MAC but reads the input words from the
+ *     hardware input buffer.  It is therefore used by the later output
+ *     filters/neurons that reuse the same input vector or convolution patch.
+ *
+ *   Input buffer
+ *     Holds up to 25 blocks = 400 bytes.  It is refreshed for each new input
+ *     patch/vector by the first output filter/neuron and then reused by the
+ *     remaining outputs.
+ *
+ *   Weight buffer
+ *     Used only by Conv1 and Conv2.  During the first spatial output position,
+ *     weight blocks are consumed by the MAC datapath and captured in hardware
+ *     at the same time.  Later spatial positions reuse those buffered weights,
+ *     removing repeated weight loads from software.  Conv1 stores 16 blocks
+ *     (256 bytes); Conv2 stores 600 blocks (9.6 kB).  FC1 and FC2 weights are
+ *     still supplied directly by software.
+ *
+ *   Local accumulator
+ *     A multi-block dot product is split into first/middle/final MAC16 blocks.
+ *     The first block starts from the bias carried in rd; middle blocks keep the
+ *     partial sum in the coprocessor; only the final block returns a result to
+ *     the architectural register file.
+ *
+ * Post-processing is also split between hardware and software.  For Conv1,
+ * Conv2 and FC1, the final MAC block already applies ReLU, right shift by 8 and
+ * unsigned 8-bit saturation in hardware, so the returned value is stored
+ * directly.  FC2 is different: only 144 of its 150 inputs are covered by the
+ * nine MAC16 blocks, therefore hardware returns the full 32-bit accumulator;
+ * software adds the remaining six scalar MAC terms and then calls sat().
+ * ============================================================================
+ */
+
 static DATA_T mem[MEMORY_SIZE];
 
 static int max(int lhs, int rhs) {
@@ -29,29 +79,33 @@ static int clamp(int v, int lo, int hi) {
 }
 
 /*
- * ============================================================
- * 统一 input buffer 辅助函数
- * ============================================================
+ * ============================================================================
+ * Accelerator layer configuration
+ * ============================================================================
  *
- * 硬件侧约定：
- *   - input buffer 最大 400 byte = 100 个 32-bit word = 25 个 16-byte block。
- *   - buf4 的 rd 字段不作为真正写回寄存器，而是作为 mode：
+ * BUF4 programs the active input-buffer length through its rd field:
  *
- *         active_blocks = rd + 1
+ *     active_blocks = rd + 1
  *
- *   - Conv1: rd = x0  -> active_blocks = 1
- *   - Conv2: rd = x24 -> active_blocks = 25
- *   - FC1:   rd = x23 -> active_blocks = 24
- *   - FC2:   rd = x8  -> active_blocks = 9，剩余 6 个 input 走 scalar
+ *   Conv1: rd = x0  ->  1 block  =  16 bytes
+ *   Conv2: rd = x24 -> 25 blocks = 400 bytes
+ *   FC1:   rd = x23 -> 24 blocks = 384 bytes
+ *   FC2:   rd = x8  ->  9 blocks = 144 bytes (+ 6 scalar bytes)
  *
- * 注意：
- *   t3 = x28，t4 = x29。硬件里 rs[3]/rs[4] 固定来自 x28/x29，
- *   所以这里继续用 t3/t4 是匹配的。
+ * These values also identify the fixed layer modes used by the coprocessor:
+ * active_blocks = 1 and 25 enable the Conv1/Conv2 weight-buffer paths, while
+ * 1, 25 and 24 enable hardware post-processing.  FC2 uses 9 blocks and is
+ * intentionally excluded from hardware post-processing because six scalar
+ * products still have to be accumulated in software.
+ *
+ * MAC16BUF_PARA supplies its four input words through fixed registers x28-x31;
+ * the software register convention must therefore match issue_read_operands.sv.
  */
 
-/* Conv1 专用：把一个 4x4x1 patch buffer 进去。
- * 这里四个指针分别指向 patch 的四行，每行连续 4 个 uint8。
- * buf4 x0 表示 active_blocks = 1，所以后续每个 mac16buf 都会读 block0。
+/*
+ * Configure Conv1 for one active 16-byte block.
+ * Each 4x4x1 input patch contains exactly 16 bytes and therefore maps to one
+ * MAC16 block. The patch itself is filled by MAC16BUF_PARA.
  */
 static inline void buffer4_setmode_conv1(void)
 {
@@ -64,9 +118,10 @@ static inline void buffer4_setmode_conv1(void)
     );
 }
 
-/* Conv2 专用：把一个 pixel 的 16 个 channels buffer 进去。
- * Conv2 一个完整 5x5x16 patch 需要连续执行 25 次这个函数。
- * buf4 x24 表示 active_blocks = 25。
+/*
+ * Configure Conv2 for 25 active 16-byte blocks.
+ * A 5x5x16 input patch contains 400 bytes = 25 MAC16 blocks.
+ * The 25 blocks are filled while output filter 0 is computed.
  */
 static inline void buffer4_setmode_conv2(void)
 {
@@ -79,8 +134,9 @@ static inline void buffer4_setmode_conv2(void)
     );
 }
 
-/* FC1 专用：FC1 input = 384 byte = 24 个 16-byte block。
- * buf4 x23 表示 active_blocks = 24。
+/*
+ * Configure FC1 for 24 active 16-byte blocks.
+ * FC1 consumes 384 input bytes = 24 MAC16 blocks.
  */
 static inline void buffer4_setmode_fc1(void)
 {
@@ -93,10 +149,10 @@ static inline void buffer4_setmode_fc1(void)
     );
 }
 
-/* FC2 专用：FC2 input = 150 byte。
- * 前 144 byte = 9 个 16-byte block 用 buffer + mac16buf，
- * 最后 6 byte 用普通 scalar 处理。
- * buf4 x8 表示 active_blocks = 9。
+/*
+ * Configure FC2 for 9 active 16-byte blocks.
+ * The first 144 input bytes are handled by 9 MAC16 blocks; the remaining
+ * 6 bytes are processed with scalar MAC operations.
  */
 static inline void buffer4_setmode_fc2(void)
 {
@@ -109,251 +165,23 @@ static inline void buffer4_setmode_fc2(void)
     );
 }
 
-/* 只执行 MAC，不更新 input buffer。
- * 这个函数假设：对应的 input block 已经在硬件 input buffer 中。
- * 硬件每执行一次 mac16buf，会根据 active_blocks 自动移动 read counter。
+/*
+
+/*
+ * ============================================================================
+ * Low-level MAC16BUF primitives
+ * ============================================================================
+ *
+ * The helpers below are ordered from the most generic execution primitives to
+ * layer-specific wrappers.  Keeping this order makes the software data path
+ * easier to follow:
+ *
+ *   1. MAC16BUF first/middle/final primitives
+ *   2. MAC16BUF_PARA primitives
+ *   3. Unrolled and offset-2 variants
+ *   4. Conv1-specific helpers
+ *   5. Conv2/FC1 multi-block wrappers
  */
-static inline __attribute__((always_inline))
-SUM_T mac16buf_para_conv1_aligned(
-    const UDATA_T* __restrict row0,
-    const UDATA_T* __restrict row1,
-    const UDATA_T* __restrict row2,
-    const UDATA_T* __restrict row3,
-    const WDATA_T* __restrict weights,
-    SUM_T initial_sum)
-{
-    SUM_T sum = initial_sum;
-    uint32_t w0, w1, w2, w3;
-
-    asm volatile(
-        "lw %[w0],  0(%[p_wt])\n\t"
-        "lw %[w1],  4(%[p_wt])\n\t"
-        "lw %[w2],  8(%[p_wt])\n\t"
-        "lw %[w3], 12(%[p_wt])\n\t"
-
-        "lw t3, 0(%[row0])\n\t"
-        "lw t4, 0(%[row1])\n\t"
-        "lw t5, 0(%[row2])\n\t"
-        "lw t6, 0(%[row3])\n\t"
-
-        /*
-         * active_blocks = 1:
-         * 这条指令既是first也是final。
-         * 同时计算output0并将input写入buffer。
-         */
-        "mac16buf_para %[sum], %[w0], %[w1], %[w2], %[w3]\n\t"
-
-        : [sum] "+r"(sum),
-          [w0] "=&r"(w0),
-          [w1] "=&r"(w1),
-          [w2] "=&r"(w2),
-          [w3] "=&r"(w3)
-        : [row0] "r"(row0),
-          [row1] "r"(row1),
-          [row2] "r"(row2),
-          [row3] "r"(row3),
-          [p_wt] "r"(weights)
-        : "t3", "t4", "t5", "t6", "memory"
-    );
-
-    return sum;
-}
-
-static inline __attribute__((always_inline))
-SUM_T mac16buf_para_conv1_aligned_wbuf(
-    const UDATA_T* __restrict row0,
-    const UDATA_T* __restrict row1,
-    const UDATA_T* __restrict row2,
-    const UDATA_T* __restrict row3,
-    SUM_T initial_sum)
-{
-    SUM_T sum = initial_sum;
-
-    asm volatile(
-        /*
-         * Input only.
-         * Weight is read from the local weight buffer.
-         */
-        "lw t3, 0(%[row0])\n\t"
-        "lw t4, 0(%[row1])\n\t"
-        "lw t5, 0(%[row2])\n\t"
-        "lw t6, 0(%[row3])\n\t"
-
-        "mac16buf_para %[sum], x0, x0, x0, x0\n\t"
-
-        : [sum] "+r"(sum)
-        : [row0] "r"(row0),
-          [row1] "r"(row1),
-          [row2] "r"(row2),
-          [row3] "r"(row3)
-        : "t3", "t4", "t5", "t6",
-          "cc", "memory"
-    );
-
-    return sum;
-}
-
-static inline __attribute__((always_inline))
-SUM_T mac16buf_para_conv1_unaligned2(
-    const UDATA_T* __restrict row0,
-    const UDATA_T* __restrict row1,
-    const UDATA_T* __restrict row2,
-    const UDATA_T* __restrict row3,
-    const WDATA_T* __restrict weights,
-    SUM_T initial_sum)
-{
-    SUM_T sum = initial_sum;
-    uint32_t w0, w1, w2, w3;
-
-    asm volatile(
-        "lw %[w0],  0(%[p_wt])\n\t"
-        "lw %[w1],  4(%[p_wt])\n\t"
-        "lw %[w2],  8(%[p_wt])\n\t"
-        "lw %[w3], 12(%[p_wt])\n\t"
-
-        /* row0: 拼出连续4 bytes */
-        "lhu t3, 0(%[row0])\n\t"
-        "lhu t0, 2(%[row0])\n\t"
-        "slli t0, t0, 16\n\t"
-        "or   t3, t3, t0\n\t"
-
-        /* row1 */
-        "lhu t4, 0(%[row1])\n\t"
-        "lhu t0, 2(%[row1])\n\t"
-        "slli t0, t0, 16\n\t"
-        "or   t4, t4, t0\n\t"
-
-        /* row2 */
-        "lhu t5, 0(%[row2])\n\t"
-        "lhu t0, 2(%[row2])\n\t"
-        "slli t0, t0, 16\n\t"
-        "or   t5, t5, t0\n\t"
-
-        /* row3 */
-        "lhu t6, 0(%[row3])\n\t"
-        "lhu t0, 2(%[row3])\n\t"
-        "slli t0, t0, 16\n\t"
-        "or   t6, t6, t0\n\t"
-
-        "mac16buf_para %[sum], %[w0], %[w1], %[w2], %[w3]\n\t"
-
-        : [sum] "+r"(sum),
-          [w0] "=&r"(w0),
-          [w1] "=&r"(w1),
-          [w2] "=&r"(w2),
-          [w3] "=&r"(w3)
-        : [row0] "r"(row0),
-          [row1] "r"(row1),
-          [row2] "r"(row2),
-          [row3] "r"(row3),
-          [p_wt] "r"(weights)
-        : "t0", "t3", "t4", "t5", "t6", "memory"
-    );
-
-    return sum;
-}
-
-static inline __attribute__((always_inline))
-SUM_T mac16buf_para_conv1_unaligned2_wbuf(
-    const UDATA_T* __restrict row0,
-    const UDATA_T* __restrict row1,
-    const UDATA_T* __restrict row2,
-    const UDATA_T* __restrict row3,
-    SUM_T initial_sum)
-{
-    SUM_T sum = initial_sum;
-
-    asm volatile(
-        /* row0 */
-        "lhu t3, 0(%[row0])\n\t"
-        "lhu t0, 2(%[row0])\n\t"
-        "slli t0, t0, 16\n\t"
-        "or   t3, t3, t0\n\t"
-
-        /* row1 */
-        "lhu t4, 0(%[row1])\n\t"
-        "lhu t0, 2(%[row1])\n\t"
-        "slli t0, t0, 16\n\t"
-        "or   t4, t4, t0\n\t"
-
-        /* row2 */
-        "lhu t5, 0(%[row2])\n\t"
-        "lhu t0, 2(%[row2])\n\t"
-        "slli t0, t0, 16\n\t"
-        "or   t5, t5, t0\n\t"
-
-        /* row3 */
-        "lhu t6, 0(%[row3])\n\t"
-        "lhu t0, 2(%[row3])\n\t"
-        "slli t0, t0, 16\n\t"
-        "or   t6, t6, t0\n\t"
-
-        /*
-         * No weight loads.
-         */
-        "mac16buf_para %[sum], x0, x0, x0, x0\n\t"
-
-        : [sum] "+r"(sum)
-        : [row0] "r"(row0),
-          [row1] "r"(row1),
-          [row2] "r"(row2),
-          [row3] "r"(row3)
-        : "t0",
-          "t3", "t4", "t5", "t6",
-          "cc", "memory"
-    );
-
-    return sum;
-}
-
-
-static inline void mac16buf_conv1(const WDATA_T* __restrict weights,
-                                 SUM_T* __restrict weightedSum)
-{
-    int32_t sum = *weightedSum;
-    const WDATA_T *p_wt = weights;
-    uint32_t w0, w1, w2, w3;
-    asm volatile(
-        "lw %[w0], 0(%[p_wt]) \n\t"
-        "lw %[w1], 4(%[p_wt]) \n\t"
-        "lw %[w2], 8(%[p_wt]) \n\t"
-        "lw %[w3], 12(%[p_wt]) \n\t"
-        "mac16buf %[sum], %[w0], %[w1], %[w2], %[w3] \n\t"
-        : [w0] "=&r" (w0),
-          [w1] "=&r" (w1),
-          [w2] "=&r" (w2),
-          [w3] "=&r" (w3),
-          [sum] "+r" (sum)
-        : [p_wt] "r" (p_wt)
-        : "cc", "memory"
-    );
-
-    *weightedSum = sum;
-}
-
-static inline __attribute__((always_inline))
-void mac16buf_conv1_wbuf(
-    SUM_T* __restrict weightedSum)
-{
-    int32_t sum = *weightedSum;
-
-    /*
-     * active_blocks = 1
-     *
-     * This instruction is both first and final:
-     *   rd input  = bias / initial accumulator
-     *   rd output = final MAC result
-     */
-    asm volatile(
-        "mac16buf %[sum], x0, x0, x0, x0 \n\t"
-
-        : [sum] "+r"(sum)
-        :
-        : "cc", "memory"
-    );
-
-    *weightedSum = sum;
-}
 
 static inline void mac16buf_first(const WDATA_T* __restrict weights,
                                  SUM_T* __restrict weightedSum)
@@ -515,272 +343,14 @@ static inline void mac16buf_wbuf_final(SUM_T* __restrict weightedSum)
     *weightedSum = sum;
 }
 
-static inline __attribute__((always_inline))
-void mac16buf_para_middle4(
-    const UDATA_T* __restrict inputs,
-    const WDATA_T* __restrict weights)
-{
-    const UDATA_T* p_in = inputs;
-    const WDATA_T* p_wt = weights;
 
-    uint32_t w0, w1, w2, w3;
-
-    asm volatile(
-
-        /*
-         * ============================================================
-         * block 0
-         * input  [0..15]
-         * weight [0..15]
-         * ============================================================
-         */
-
-        "lw %[w0],  0(%[p_wt]) \n\t"
-        "lw %[w1],  4(%[p_wt]) \n\t"
-        "lw %[w2],  8(%[p_wt]) \n\t"
-        "lw %[w3], 12(%[p_wt]) \n\t"
-
-        "lw t3,  0(%[p_in]) \n\t"
-        "lw t4,  4(%[p_in]) \n\t"
-        "lw t5,  8(%[p_in]) \n\t"
-        "lw t6, 12(%[p_in]) \n\t"
-
-        "mac16buf_para x0, %[w0], %[w1], %[w2], %[w3] \n\t"
-
-
-        /*
-         * ============================================================
-         * block 1
-         * input  [16..31]
-         * weight [16..31]
-         * ============================================================
-         */
-
-        "lw %[w0], 16(%[p_wt]) \n\t"
-        "lw %[w1], 20(%[p_wt]) \n\t"
-        "lw %[w2], 24(%[p_wt]) \n\t"
-        "lw %[w3], 28(%[p_wt]) \n\t"
-
-        "lw t3, 16(%[p_in]) \n\t"
-        "lw t4, 20(%[p_in]) \n\t"
-        "lw t5, 24(%[p_in]) \n\t"
-        "lw t6, 28(%[p_in]) \n\t"
-
-        "mac16buf_para x0, %[w0], %[w1], %[w2], %[w3] \n\t"
-
-
-        /*
-         * ============================================================
-         * block 2
-         * input  [32..47]
-         * weight [32..47]
-         * ============================================================
-         */
-
-        "lw %[w0], 32(%[p_wt]) \n\t"
-        "lw %[w1], 36(%[p_wt]) \n\t"
-        "lw %[w2], 40(%[p_wt]) \n\t"
-        "lw %[w3], 44(%[p_wt]) \n\t"
-
-        "lw t3, 32(%[p_in]) \n\t"
-        "lw t4, 36(%[p_in]) \n\t"
-        "lw t5, 40(%[p_in]) \n\t"
-        "lw t6, 44(%[p_in]) \n\t"
-
-        "mac16buf_para x0, %[w0], %[w1], %[w2], %[w3] \n\t"
-
-
-        /*
-         * ============================================================
-         * block 3
-         * input  [48..63]
-         * weight [48..63]
-         * ============================================================
-         */
-
-        "lw %[w0], 48(%[p_wt]) \n\t"
-        "lw %[w1], 52(%[p_wt]) \n\t"
-        "lw %[w2], 56(%[p_wt]) \n\t"
-        "lw %[w3], 60(%[p_wt]) \n\t"
-
-        "lw t3, 48(%[p_in]) \n\t"
-        "lw t4, 52(%[p_in]) \n\t"
-        "lw t5, 56(%[p_in]) \n\t"
-        "lw t6, 60(%[p_in]) \n\t"
-
-        "mac16buf_para x0, %[w0], %[w1], %[w2], %[w3] \n\t"
-
-        : [w0] "=&r" (w0),
-          [w1] "=&r" (w1),
-          [w2] "=&r" (w2),
-          [w3] "=&r" (w3)
-
-        : [p_in] "r" (p_in),
-          [p_wt] "r" (p_wt)
-
-        : "t3", "t4", "t5", "t6",
-          "cc", "memory"
-    );
-}
-
-static inline __attribute__((always_inline))
-void mac16buf_first_offset2(
-    const WDATA_T* __restrict weights,
-    SUM_T* __restrict weightedSum)
-{
-    int32_t sum = *weightedSum;
-    const WDATA_T* p_wt = weights;
-
-    uint32_t w0, w1, w2, w3;
-    uint32_t tmp;
-
-    asm volatile(
-        /* w0 = weights[0..3] */
-        "lhu %[w0], 0(%[p_wt]) \n\t"
-        "lhu %[tmp], 2(%[p_wt]) \n\t"
-        "slli %[tmp], %[tmp], 16 \n\t"
-        "or %[w0], %[w0], %[tmp] \n\t"
-
-        /* w1 = weights[4..7] */
-        "lhu %[w1], 4(%[p_wt]) \n\t"
-        "lhu %[tmp], 6(%[p_wt]) \n\t"
-        "slli %[tmp], %[tmp], 16 \n\t"
-        "or %[w1], %[w1], %[tmp] \n\t"
-
-        /* w2 = weights[8..11] */
-        "lhu %[w2], 8(%[p_wt]) \n\t"
-        "lhu %[tmp], 10(%[p_wt]) \n\t"
-        "slli %[tmp], %[tmp], 16 \n\t"
-        "or %[w2], %[w2], %[tmp] \n\t"
-
-        /* w3 = weights[12..15] */
-        "lhu %[w3], 12(%[p_wt]) \n\t"
-        "lhu %[tmp], 14(%[p_wt]) \n\t"
-        "slli %[tmp], %[tmp], 16 \n\t"
-        "or %[w3], %[w3], %[tmp] \n\t"
-
-        /*
-         * first:
-         * CPU rd中的bias进入local accumulator。
-         */
-        "mac16buf %[sum], %[w0], %[w1], %[w2], %[w3] \n\t"
-
-        : [w0] "=&r"(w0),
-          [w1] "=&r"(w1),
-          [w2] "=&r"(w2),
-          [w3] "=&r"(w3),
-          [tmp] "=&r"(tmp)
-
-        : [sum] "r"(sum),
-          [p_wt] "r"(p_wt)
-
-        : "cc", "memory"
-    );
-}
-
-
-static inline __attribute__((always_inline))
-void mac16buf_middle_offset2(
-    const WDATA_T* __restrict weights)
-{
-    const WDATA_T* p_wt = weights;
-
-    uint32_t w0, w1, w2, w3;
-    uint32_t tmp;
-
-    asm volatile(
-        "lhu %[w0], 0(%[p_wt]) \n\t"
-        "lhu %[tmp], 2(%[p_wt]) \n\t"
-        "slli %[tmp], %[tmp], 16 \n\t"
-        "or %[w0], %[w0], %[tmp] \n\t"
-
-        "lhu %[w1], 4(%[p_wt]) \n\t"
-        "lhu %[tmp], 6(%[p_wt]) \n\t"
-        "slli %[tmp], %[tmp], 16 \n\t"
-        "or %[w1], %[w1], %[tmp] \n\t"
-
-        "lhu %[w2], 8(%[p_wt]) \n\t"
-        "lhu %[tmp], 10(%[p_wt]) \n\t"
-        "slli %[tmp], %[tmp], 16 \n\t"
-        "or %[w2], %[w2], %[tmp] \n\t"
-
-        "lhu %[w3], 12(%[p_wt]) \n\t"
-        "lhu %[tmp], 14(%[p_wt]) \n\t"
-        "slli %[tmp], %[tmp], 16 \n\t"
-        "or %[w3], %[w3], %[tmp] \n\t"
-
-        /*
-         * middle:
-         * 不读CPU rd，不写CPU rd。
-         */
-        "mac16buf x0, %[w0], %[w1], %[w2], %[w3] \n\t"
-
-        : [w0] "=&r"(w0),
-          [w1] "=&r"(w1),
-          [w2] "=&r"(w2),
-          [w3] "=&r"(w3),
-          [tmp] "=&r"(tmp)
-
-        : [p_wt] "r"(p_wt)
-
-        : "cc", "memory"
-    );
-}
-
-
-static inline __attribute__((always_inline))
-void mac16buf_final_offset2(
-    const WDATA_T* __restrict weights,
-    SUM_T* __restrict weightedSum)
-{
-    int32_t sum;
-    const WDATA_T* p_wt = weights;
-
-    uint32_t w0, w1, w2, w3;
-    uint32_t tmp;
-
-    asm volatile(
-        "lhu %[w0], 0(%[p_wt]) \n\t"
-        "lhu %[tmp], 2(%[p_wt]) \n\t"
-        "slli %[tmp], %[tmp], 16 \n\t"
-        "or %[w0], %[w0], %[tmp] \n\t"
-
-        "lhu %[w1], 4(%[p_wt]) \n\t"
-        "lhu %[tmp], 6(%[p_wt]) \n\t"
-        "slli %[tmp], %[tmp], 16 \n\t"
-        "or %[w1], %[w1], %[tmp] \n\t"
-
-        "lhu %[w2], 8(%[p_wt]) \n\t"
-        "lhu %[tmp], 10(%[p_wt]) \n\t"
-        "slli %[tmp], %[tmp], 16 \n\t"
-        "or %[w2], %[w2], %[tmp] \n\t"
-
-        "lhu %[w3], 12(%[p_wt]) \n\t"
-        "lhu %[tmp], 14(%[p_wt]) \n\t"
-        "slli %[tmp], %[tmp], 16 \n\t"
-        "or %[w3], %[w3], %[tmp] \n\t"
-
-        /*
-         * final:
-         * local accumulator写回CPU rd。
-         */
-        "mac16buf %[sum], %[w0], %[w1], %[w2], %[w3] \n\t"
-
-        : [sum] "=r"(sum),
-          [w0] "=&r"(w0),
-          [w1] "=&r"(w1),
-          [w2] "=&r"(w2),
-          [w3] "=&r"(w3),
-          [tmp] "=&r"(tmp)
-
-        : [p_wt] "r"(p_wt)
-
-        : "cc", "memory"
-    );
-
-    *weightedSum = sum;
-}
-
+/*
+ * ----------------------------------------------------------------------------
+ * MAC16BUF_PARA primitives
+ * ----------------------------------------------------------------------------
+ * These variants provide the input block through x28-x31.  The coprocessor
+ * computes the MAC and stores the same input words into the input buffer.
+ */
 
 static inline void mac16buf_para_first(const UDATA_T* __restrict inputs,
                                       const WDATA_T* __restrict weights,
@@ -960,20 +530,575 @@ void mac16buf_para_wbuf_final(
 }
 
 
+
+/*
+ * ----------------------------------------------------------------------------
+ * Unrolled and alignment-specialized helpers
+ * ----------------------------------------------------------------------------
+ */
+
+/*
+ * ============================================================================
+ * MAC16BUF_PARA helpers: input-buffer fill path
+ * ============================================================================
+ */
+
+static inline __attribute__((always_inline))
+void mac16buf_para_middle4(
+    const UDATA_T* __restrict inputs,
+    const WDATA_T* __restrict weights)
+{
+    const UDATA_T* p_in = inputs;
+    const WDATA_T* p_wt = weights;
+
+    uint32_t w0, w1, w2, w3;
+
+    asm volatile(
+
+        /*
+         * ============================================================
+         * block 0
+         * input  [0..15]
+         * weight [0..15]
+         * ============================================================
+         */
+
+        "lw %[w0],  0(%[p_wt]) \n\t"
+        "lw %[w1],  4(%[p_wt]) \n\t"
+        "lw %[w2],  8(%[p_wt]) \n\t"
+        "lw %[w3], 12(%[p_wt]) \n\t"
+
+        "lw t3,  0(%[p_in]) \n\t"
+        "lw t4,  4(%[p_in]) \n\t"
+        "lw t5,  8(%[p_in]) \n\t"
+        "lw t6, 12(%[p_in]) \n\t"
+
+        "mac16buf_para x0, %[w0], %[w1], %[w2], %[w3] \n\t"
+
+
+        /*
+         * ============================================================
+         * block 1
+         * input  [16..31]
+         * weight [16..31]
+         * ============================================================
+         */
+
+        "lw %[w0], 16(%[p_wt]) \n\t"
+        "lw %[w1], 20(%[p_wt]) \n\t"
+        "lw %[w2], 24(%[p_wt]) \n\t"
+        "lw %[w3], 28(%[p_wt]) \n\t"
+
+        "lw t3, 16(%[p_in]) \n\t"
+        "lw t4, 20(%[p_in]) \n\t"
+        "lw t5, 24(%[p_in]) \n\t"
+        "lw t6, 28(%[p_in]) \n\t"
+
+        "mac16buf_para x0, %[w0], %[w1], %[w2], %[w3] \n\t"
+
+
+        /*
+         * ============================================================
+         * block 2
+         * input  [32..47]
+         * weight [32..47]
+         * ============================================================
+         */
+
+        "lw %[w0], 32(%[p_wt]) \n\t"
+        "lw %[w1], 36(%[p_wt]) \n\t"
+        "lw %[w2], 40(%[p_wt]) \n\t"
+        "lw %[w3], 44(%[p_wt]) \n\t"
+
+        "lw t3, 32(%[p_in]) \n\t"
+        "lw t4, 36(%[p_in]) \n\t"
+        "lw t5, 40(%[p_in]) \n\t"
+        "lw t6, 44(%[p_in]) \n\t"
+
+        "mac16buf_para x0, %[w0], %[w1], %[w2], %[w3] \n\t"
+
+
+        /*
+         * ============================================================
+         * block 3
+         * input  [48..63]
+         * weight [48..63]
+         * ============================================================
+         */
+
+        "lw %[w0], 48(%[p_wt]) \n\t"
+        "lw %[w1], 52(%[p_wt]) \n\t"
+        "lw %[w2], 56(%[p_wt]) \n\t"
+        "lw %[w3], 60(%[p_wt]) \n\t"
+
+        "lw t3, 48(%[p_in]) \n\t"
+        "lw t4, 52(%[p_in]) \n\t"
+        "lw t5, 56(%[p_in]) \n\t"
+        "lw t6, 60(%[p_in]) \n\t"
+
+        "mac16buf_para x0, %[w0], %[w1], %[w2], %[w3] \n\t"
+
+        : [w0] "=&r" (w0),
+          [w1] "=&r" (w1),
+          [w2] "=&r" (w2),
+          [w3] "=&r" (w3)
+
+        : [p_in] "r" (p_in),
+          [p_wt] "r" (p_wt)
+
+        : "t3", "t4", "t5", "t6",
+          "cc", "memory"
+    );
+}
+
+/*
+ * ============================================================================
+ * FC2 unaligned-weight helpers
+ * ============================================================================
+ */
+
+static inline __attribute__((always_inline))
+void mac16buf_first_offset2(
+    const WDATA_T* __restrict weights,
+    SUM_T* __restrict weightedSum)
+{
+    int32_t sum = *weightedSum;
+    const WDATA_T* p_wt = weights;
+
+    uint32_t w0, w1, w2, w3;
+    uint32_t tmp;
+
+    asm volatile(
+        /* w0 = weights[0..3] */
+        "lhu %[w0], 0(%[p_wt]) \n\t"
+        "lhu %[tmp], 2(%[p_wt]) \n\t"
+        "slli %[tmp], %[tmp], 16 \n\t"
+        "or %[w0], %[w0], %[tmp] \n\t"
+
+        /* w1 = weights[4..7] */
+        "lhu %[w1], 4(%[p_wt]) \n\t"
+        "lhu %[tmp], 6(%[p_wt]) \n\t"
+        "slli %[tmp], %[tmp], 16 \n\t"
+        "or %[w1], %[w1], %[tmp] \n\t"
+
+        /* w2 = weights[8..11] */
+        "lhu %[w2], 8(%[p_wt]) \n\t"
+        "lhu %[tmp], 10(%[p_wt]) \n\t"
+        "slli %[tmp], %[tmp], 16 \n\t"
+        "or %[w2], %[w2], %[tmp] \n\t"
+
+        /* w3 = weights[12..15] */
+        "lhu %[w3], 12(%[p_wt]) \n\t"
+        "lhu %[tmp], 14(%[p_wt]) \n\t"
+        "slli %[tmp], %[tmp], 16 \n\t"
+        "or %[w3], %[w3], %[tmp] \n\t"
+
+        /*
+         * First block: initialize the local accumulator from rd (bias).
+         */
+        "mac16buf %[sum], %[w0], %[w1], %[w2], %[w3] \n\t"
+
+        : [w0] "=&r"(w0),
+          [w1] "=&r"(w1),
+          [w2] "=&r"(w2),
+          [w3] "=&r"(w3),
+          [tmp] "=&r"(tmp)
+
+        : [sum] "r"(sum),
+          [p_wt] "r"(p_wt)
+
+        : "cc", "memory"
+    );
+}
+
+
+static inline __attribute__((always_inline))
+void mac16buf_middle_offset2(
+    const WDATA_T* __restrict weights)
+{
+    const WDATA_T* p_wt = weights;
+
+    uint32_t w0, w1, w2, w3;
+    uint32_t tmp;
+
+    asm volatile(
+        "lhu %[w0], 0(%[p_wt]) \n\t"
+        "lhu %[tmp], 2(%[p_wt]) \n\t"
+        "slli %[tmp], %[tmp], 16 \n\t"
+        "or %[w0], %[w0], %[tmp] \n\t"
+
+        "lhu %[w1], 4(%[p_wt]) \n\t"
+        "lhu %[tmp], 6(%[p_wt]) \n\t"
+        "slli %[tmp], %[tmp], 16 \n\t"
+        "or %[w1], %[w1], %[tmp] \n\t"
+
+        "lhu %[w2], 8(%[p_wt]) \n\t"
+        "lhu %[tmp], 10(%[p_wt]) \n\t"
+        "slli %[tmp], %[tmp], 16 \n\t"
+        "or %[w2], %[w2], %[tmp] \n\t"
+
+        "lhu %[w3], 12(%[p_wt]) \n\t"
+        "lhu %[tmp], 14(%[p_wt]) \n\t"
+        "slli %[tmp], %[tmp], 16 \n\t"
+        "or %[w3], %[w3], %[tmp] \n\t"
+
+        /*
+         * Middle block: keep the partial sum in the local accumulator.
+         * No architectural register write-back is requested.
+         */
+        "mac16buf x0, %[w0], %[w1], %[w2], %[w3] \n\t"
+
+        : [w0] "=&r"(w0),
+          [w1] "=&r"(w1),
+          [w2] "=&r"(w2),
+          [w3] "=&r"(w3),
+          [tmp] "=&r"(tmp)
+
+        : [p_wt] "r"(p_wt)
+
+        : "cc", "memory"
+    );
+}
+
+
+static inline __attribute__((always_inline))
+void mac16buf_final_offset2(
+    const WDATA_T* __restrict weights,
+    SUM_T* __restrict weightedSum)
+{
+    int32_t sum;
+    const WDATA_T* p_wt = weights;
+
+    uint32_t w0, w1, w2, w3;
+    uint32_t tmp;
+
+    asm volatile(
+        "lhu %[w0], 0(%[p_wt]) \n\t"
+        "lhu %[tmp], 2(%[p_wt]) \n\t"
+        "slli %[tmp], %[tmp], 16 \n\t"
+        "or %[w0], %[w0], %[tmp] \n\t"
+
+        "lhu %[w1], 4(%[p_wt]) \n\t"
+        "lhu %[tmp], 6(%[p_wt]) \n\t"
+        "slli %[tmp], %[tmp], 16 \n\t"
+        "or %[w1], %[w1], %[tmp] \n\t"
+
+        "lhu %[w2], 8(%[p_wt]) \n\t"
+        "lhu %[tmp], 10(%[p_wt]) \n\t"
+        "slli %[tmp], %[tmp], 16 \n\t"
+        "or %[w2], %[w2], %[tmp] \n\t"
+
+        "lhu %[w3], 12(%[p_wt]) \n\t"
+        "lhu %[tmp], 14(%[p_wt]) \n\t"
+        "slli %[tmp], %[tmp], 16 \n\t"
+        "or %[w3], %[w3], %[tmp] \n\t"
+
+        /*
+         * Final block: write the completed local accumulator back to rd.
+         */
+        "mac16buf %[sum], %[w0], %[w1], %[w2], %[w3] \n\t"
+
+        : [sum] "=r"(sum),
+          [w0] "=&r"(w0),
+          [w1] "=&r"(w1),
+          [w2] "=&r"(w2),
+          [w3] "=&r"(w3),
+          [tmp] "=&r"(tmp)
+
+        : [p_wt] "r"(p_wt)
+
+        : "cc", "memory"
+    );
+
+    *weightedSum = sum;
+}
+
+
+
+/*
+ * ----------------------------------------------------------------------------
+ * Conv1-specific helpers
+ * ----------------------------------------------------------------------------
+ * Conv1 uses one 16-byte block per output.  The aligned and +2-byte variants
+ * differ only in how the 4x4 patch is loaded; the *_wbuf variants reuse the
+ * Conv1 weights already captured by the coprocessor.
+ */
+
+/*
+ * Conv1 MAC16BUF_PARA helpers.
+ *
+ * The first spatial patch uses the variants that also supply weight words, so
+ * the coprocessor can capture Conv1 weights while computing.  Once the 16
+ * Conv1 weight blocks have been captured, the *_wbuf variants supply only the
+ * input words; the weight words come from the local hardware weight buffer.
+ * In both cases the current 4x4 input patch is written into input-buffer block 0.
+ */
+static inline __attribute__((always_inline))
+SUM_T mac16buf_para_conv1_aligned(
+    const UDATA_T* __restrict row0,
+    const UDATA_T* __restrict row1,
+    const UDATA_T* __restrict row2,
+    const UDATA_T* __restrict row3,
+    const WDATA_T* __restrict weights,
+    SUM_T initial_sum)
+{
+    SUM_T sum = initial_sum;
+    uint32_t w0, w1, w2, w3;
+
+    asm volatile(
+        "lw %[w0],  0(%[p_wt])\n\t"
+        "lw %[w1],  4(%[p_wt])\n\t"
+        "lw %[w2],  8(%[p_wt])\n\t"
+        "lw %[w3], 12(%[p_wt])\n\t"
+
+        "lw t3, 0(%[row0])\n\t"
+        "lw t4, 0(%[row1])\n\t"
+        "lw t5, 0(%[row2])\n\t"
+        "lw t6, 0(%[row3])\n\t"
+
+        /*
+         * Conv1 uses active_blocks = 1, so this instruction is both the first
+         * and final block. It computes the MAC16 result and fills input block 0.
+         */
+        "mac16buf_para %[sum], %[w0], %[w1], %[w2], %[w3]\n\t"
+
+        : [sum] "+r"(sum),
+          [w0] "=&r"(w0),
+          [w1] "=&r"(w1),
+          [w2] "=&r"(w2),
+          [w3] "=&r"(w3)
+        : [row0] "r"(row0),
+          [row1] "r"(row1),
+          [row2] "r"(row2),
+          [row3] "r"(row3),
+          [p_wt] "r"(weights)
+        : "t3", "t4", "t5", "t6", "memory"
+    );
+
+    return sum;
+}
+
+static inline __attribute__((always_inline))
+SUM_T mac16buf_para_conv1_aligned_wbuf(
+    const UDATA_T* __restrict row0,
+    const UDATA_T* __restrict row1,
+    const UDATA_T* __restrict row2,
+    const UDATA_T* __restrict row3,
+    SUM_T initial_sum)
+{
+    SUM_T sum = initial_sum;
+
+    asm volatile(
+        /*
+         * Input only.
+         * Weight is read from the local weight buffer.
+         */
+        "lw t3, 0(%[row0])\n\t"
+        "lw t4, 0(%[row1])\n\t"
+        "lw t5, 0(%[row2])\n\t"
+        "lw t6, 0(%[row3])\n\t"
+
+        "mac16buf_para %[sum], x0, x0, x0, x0\n\t"
+
+        : [sum] "+r"(sum)
+        : [row0] "r"(row0),
+          [row1] "r"(row1),
+          [row2] "r"(row2),
+          [row3] "r"(row3)
+        : "t3", "t4", "t5", "t6",
+          "cc", "memory"
+    );
+
+    return sum;
+}
+
+static inline __attribute__((always_inline))
+SUM_T mac16buf_para_conv1_unaligned2(
+    const UDATA_T* __restrict row0,
+    const UDATA_T* __restrict row1,
+    const UDATA_T* __restrict row2,
+    const UDATA_T* __restrict row3,
+    const WDATA_T* __restrict weights,
+    SUM_T initial_sum)
+{
+    SUM_T sum = initial_sum;
+    uint32_t w0, w1, w2, w3;
+
+    asm volatile(
+        "lw %[w0],  0(%[p_wt])\n\t"
+        "lw %[w1],  4(%[p_wt])\n\t"
+        "lw %[w2],  8(%[p_wt])\n\t"
+        "lw %[w3], 12(%[p_wt])\n\t"
+
+        /* Reconstruct four consecutive bytes from two halfword loads. */
+        "lhu t3, 0(%[row0])\n\t"
+        "lhu t0, 2(%[row0])\n\t"
+        "slli t0, t0, 16\n\t"
+        "or   t3, t3, t0\n\t"
+
+        /* row1 */
+        "lhu t4, 0(%[row1])\n\t"
+        "lhu t0, 2(%[row1])\n\t"
+        "slli t0, t0, 16\n\t"
+        "or   t4, t4, t0\n\t"
+
+        /* row2 */
+        "lhu t5, 0(%[row2])\n\t"
+        "lhu t0, 2(%[row2])\n\t"
+        "slli t0, t0, 16\n\t"
+        "or   t5, t5, t0\n\t"
+
+        /* row3 */
+        "lhu t6, 0(%[row3])\n\t"
+        "lhu t0, 2(%[row3])\n\t"
+        "slli t0, t0, 16\n\t"
+        "or   t6, t6, t0\n\t"
+
+        "mac16buf_para %[sum], %[w0], %[w1], %[w2], %[w3]\n\t"
+
+        : [sum] "+r"(sum),
+          [w0] "=&r"(w0),
+          [w1] "=&r"(w1),
+          [w2] "=&r"(w2),
+          [w3] "=&r"(w3)
+        : [row0] "r"(row0),
+          [row1] "r"(row1),
+          [row2] "r"(row2),
+          [row3] "r"(row3),
+          [p_wt] "r"(weights)
+        : "t0", "t3", "t4", "t5", "t6", "memory"
+    );
+
+    return sum;
+}
+
+static inline __attribute__((always_inline))
+SUM_T mac16buf_para_conv1_unaligned2_wbuf(
+    const UDATA_T* __restrict row0,
+    const UDATA_T* __restrict row1,
+    const UDATA_T* __restrict row2,
+    const UDATA_T* __restrict row3,
+    SUM_T initial_sum)
+{
+    SUM_T sum = initial_sum;
+
+    asm volatile(
+        /* row0 */
+        "lhu t3, 0(%[row0])\n\t"
+        "lhu t0, 2(%[row0])\n\t"
+        "slli t0, t0, 16\n\t"
+        "or   t3, t3, t0\n\t"
+
+        /* row1 */
+        "lhu t4, 0(%[row1])\n\t"
+        "lhu t0, 2(%[row1])\n\t"
+        "slli t0, t0, 16\n\t"
+        "or   t4, t4, t0\n\t"
+
+        /* row2 */
+        "lhu t5, 0(%[row2])\n\t"
+        "lhu t0, 2(%[row2])\n\t"
+        "slli t0, t0, 16\n\t"
+        "or   t5, t5, t0\n\t"
+
+        /* row3 */
+        "lhu t6, 0(%[row3])\n\t"
+        "lhu t0, 2(%[row3])\n\t"
+        "slli t0, t0, 16\n\t"
+        "or   t6, t6, t0\n\t"
+
+        /*
+         * No weight loads.
+         */
+        "mac16buf_para %[sum], x0, x0, x0, x0\n\t"
+
+        : [sum] "+r"(sum)
+        : [row0] "r"(row0),
+          [row1] "r"(row1),
+          [row2] "r"(row2),
+          [row3] "r"(row3)
+        : "t0",
+          "t3", "t4", "t5", "t6",
+          "cc", "memory"
+    );
+
+    return sum;
+}
+
+static inline void mac16buf_conv1(const WDATA_T* __restrict weights,
+                                 SUM_T* __restrict weightedSum)
+{
+    int32_t sum = *weightedSum;
+    const WDATA_T *p_wt = weights;
+    uint32_t w0, w1, w2, w3;
+    asm volatile(
+        "lw %[w0], 0(%[p_wt]) \n\t"
+        "lw %[w1], 4(%[p_wt]) \n\t"
+        "lw %[w2], 8(%[p_wt]) \n\t"
+        "lw %[w3], 12(%[p_wt]) \n\t"
+        "mac16buf %[sum], %[w0], %[w1], %[w2], %[w3] \n\t"
+        : [w0] "=&r" (w0),
+          [w1] "=&r" (w1),
+          [w2] "=&r" (w2),
+          [w3] "=&r" (w3),
+          [sum] "+r" (sum)
+        : [p_wt] "r" (p_wt)
+        : "cc", "memory"
+    );
+
+    *weightedSum = sum;
+}
+
+static inline __attribute__((always_inline))
+void mac16buf_conv1_wbuf(
+    SUM_T* __restrict weightedSum)
+{
+    int32_t sum = *weightedSum;
+
+    /*
+     * active_blocks = 1
+     *
+     * This instruction is both first and final:
+     *   rd input  = bias / initial accumulator
+     *   rd output = final MAC result
+     */
+    asm volatile(
+        "mac16buf %[sum], x0, x0, x0, x0 \n\t"
+
+        : [sum] "+r"(sum)
+        :
+        : "cc", "memory"
+    );
+
+    *weightedSum = sum;
+}
+
+
+/*
+ * ----------------------------------------------------------------------------
+ * Layer-sized multi-block wrappers
+ * ----------------------------------------------------------------------------
+ * Conv2 consumes 25 MAC16 blocks per output and FC1 consumes 24.  These
+ * wrappers sequence first/middle/final operations while preserving the local
+ * accumulator protocol implemented in hardware.
+ */
+
+/*
+ * ============================================================================
+ * Layer-level MAC16 block sequences
+ * ============================================================================
+ */
+
 static inline __attribute__((always_inline))
 void mac16buf_conv2_25blocks(
     const WDATA_T* __restrict weights,
     SUM_T* __restrict weightedSum)
 {
     /*
-     * Conv2:
-     *
-     * 5 × 5 × 16 = 400 weights
-     * 400 / 16 = 25 MAC16 blocks
-     *
-     * block 0      : first
-     * block 1..23  : middle
-     * block 24     : final
+     * Conv2 uses 5 x 5 x 16 = 400 weights = 25 MAC16 blocks:
+     *   block 0      : first
+     *   blocks 1..23 : middle
+     *   block 24     : final
      */
 
     /* block 0 */
@@ -983,9 +1108,8 @@ void mac16buf_conv2_25blocks(
     );
 
     /*
-     * blocks 1..20
-     *
-     * 每个middle4处理4个连续block = 64 weights。
+     * Blocks 1..20 are grouped in five calls to mac16buf_middle4().
+     * Each call processes four consecutive 16-byte weight blocks.
      */
     mac16buf_middle4(weights + 16);   // blocks 1..4
     mac16buf_middle4(weights + 80);   // blocks 5..8
@@ -1009,14 +1133,8 @@ static inline __attribute__((always_inline))
 void mac16buf_wbuf_conv2_25blocks(SUM_T* __restrict weightedSum)
 {
     /*
-     * Conv2:
-     *
-     * 5 × 5 × 16 = 400 weights
-     * 400 / 16 = 25 MAC16 blocks
-     *
-     * block 0      : first
-     * block 1..23  : middle
-     * block 24     : final
+     * Conv2 weight-buffer path: 25 MAC16 blocks are read directly from the
+     * local weight buffer using the same first/middle/final sequence.
      */
 
     /* block 0 */
@@ -1025,9 +1143,7 @@ void mac16buf_wbuf_conv2_25blocks(SUM_T* __restrict weightedSum)
     );
 
     /*
-     * blocks 1..20
-     *
-     * 每个middle4处理4个连续block = 64 weights。
+     * Blocks 1..20 are grouped in five calls to mac16buf_wbuf_middle4().
      */
     mac16buf_wbuf_middle4();   // blocks 1..4
     mac16buf_wbuf_middle4();   // blocks 5..8
@@ -1082,6 +1198,14 @@ void mac16buf_fc1_24blocks(
 }
 
 
+
+/*
+ * ============================================================================
+ * Scalar reference and software post-processing helpers
+ * ============================================================================
+ */
+
+/* Scalar reference helper retained from the baseline implementation. */
 static void macsOnRange(const UDATA_T* __restrict inputs,
                         const WDATA_T* __restrict weights,
                         SUM_T* __restrict weightedSum,
@@ -1118,6 +1242,13 @@ static UDATA_T sat(SUM_T weightedSum, int output,
     return saturate(weightedSum>>shift, NB_BITS);
 }
 
+
+/*
+ * ============================================================================
+ * Layer propagation functions
+ * ============================================================================
+ */
+
 static void convcellPropagate1(
     const UDATA_T* __restrict inputs,
     UDATA_T* __restrict outputs,
@@ -1138,18 +1269,14 @@ static void convcellPropagate1(
     int KERNEL_WIDTH,
     ActivationFunction_T ACTIVATION,
 
-    /*
-     * Input memory mapping。
-     */
+    /* Input memory-mapping parameters. */
     int INPUT_MEM_CONT_OFFSET,
     int INPUT_MEM_CONT_SIZE,
     int INPUT_MEM_WRAP_OFFSET,
     int INPUT_MEM_WRAP_SIZE,
     int INPUT_MEM_STRIDE,
 
-    /*
-     * Output memory mapping。
-     */
+    /* Output memory-mapping parameters. */
     int OUTPUT_MEM_CONT_OFFSET,
     int OUTPUT_MEM_CONT_SIZE,
     int OUTPUT_MEM_WRAP_OFFSET,
@@ -1157,67 +1284,54 @@ static void convcellPropagate1(
     int OUTPUT_MEM_STRIDE)
 {
     /*
-     * 当前函数是针对当前固定Conv1配置的加速路径：
+     * Specialized Conv1 acceleration path for the current network:
+     *   NB_CHANNELS   = 1
+     *   KERNEL        = 4 x 4
+     *   STRIDE        = 2 x 2
+     *   PADDING       = 0
      *
-     * NB_CHANNELS    = 1
-     * KERNEL_WIDTH   = 4
-     * KERNEL_HEIGHT  = 4
-     * STRIDE_X       = 2
-     * STRIDE_Y       = 2
-     * PADDING_X      = 0
-     * PADDING_Y      = 0
-     *
-     * 一个Conv1 kernel包含：
-     *
-     *   4 × 4 × 1 = 16 inputs
-     *
-     * 正好对应一条MAC16。
+     * One kernel contains 4 x 4 x 1 = 16 input values, exactly one MAC16 block.
      */
 
     /*
-     * 设置Conv1模式：
+     * Conv1 uses one 16-byte input block per 4x4 patch.  For each spatial
+     * position, output filter 0 executes MAC16BUF_PARA: it computes the first
+     * output and refreshes input-buffer block 0 at the same time.  Filters
+     * 1..15 then reuse that input block with MAC16BUF.
      *
-     * buf4 x0 => active_blocks = 1。
-     *
-     * 这里只需要设置一次。
-     * 后面每个patch的output 0会通过mac16buf_para更新buffer内容。
+     * At the first spatial position only, all 16 filter weight blocks are also
+     * captured into the hardware weight buffer while they are being used.  All
+     * later spatial positions therefore reuse both buffered inputs and buffered
+     * weights instead of loading the Conv1 weights again from memory.
      */
     buffer4_setmode_conv1();
 
-    /*
-     * 每个filter包含16个weights。
-     */
+    /* Each Conv1 output filter contains 16 weights. */
     const int filter_size
         = NB_CHANNELS * KERNEL_HEIGHT * KERNEL_WIDTH;
 
     /*
-     * 相邻input行之间的byte距离。
-     *
-     * 当前Conv1中：
-     *
-     * CHANNELS_WIDTH = 24
-     * INPUT_MEM_STRIDE = 1
-     *
-     * 因此row_stride = 24 bytes。
+     * Byte distance between two adjacent input rows.
+     * For the current Conv1 configuration:
+     *   CHANNELS_WIDTH   = 24
+     *   INPUT_MEM_STRIDE = 1
+     * therefore row_stride = 24 bytes.
      */
     const int row_stride
         = CHANNELS_WIDTH * INPUT_MEM_STRIDE;
 
     for (int oy = 0; oy < OUTPUTS_HEIGHT; ++oy) {
-        /*
-         * 当前网络padding为0。
-         */
+        /* The current network uses zero padding for Conv1. */
         const int iy
             = oy * STRIDE_Y - PADDING_Y;
 
         for (int ox = 0; ox < OUTPUTS_WIDTH; ++ox) {
+            /* Capture all Conv1 filter weights only at the first spatial position. */
             const int capture_weights = (ox == 0 && oy == 0);
             const int ix
                 = ox * STRIDE_X - PADDING_X;
 
-            /*
-             * 当前4×4 patch左上角input位置。
-             */
+            /* Top-left input position of the current 4x4 patch. */
             const int input_position
                 = ix + CHANNELS_WIDTH * iy;
 
@@ -1225,8 +1339,8 @@ static void convcellPropagate1(
                 = INPUT_MEM_STRIDE * input_position;
 
             /*
-             * 当前Conv1输入正常情况下不存在wrap。
-             * 保留这一判断，避免memory mapping以后发生改变。
+             * Wrapping is not expected for the current Conv1 memory layout.
+             * Keep the check to preserve compatibility with the mapping parameters.
              */
             if (INPUT_MEM_WRAP_SIZE > 0
                 && input_offset >= INPUT_MEM_CONT_SIZE)
@@ -1237,9 +1351,7 @@ static void convcellPropagate1(
                     - INPUT_MEM_CONT_SIZE;
             }
 
-            /*
-             * 四行input指针。
-             */
+            /* Pointers to the four rows of the current 4x4 patch. */
             const UDATA_T* row0
                 = inputs + input_offset;
 
@@ -1252,9 +1364,7 @@ static void convcellPropagate1(
             const UDATA_T* row3
                 = row2 + row_stride;
 
-            /*
-             * 当前输出位置。
-             */
+            /* Output-memory position for the current spatial location. */
             const int output_position
                 = ox + OUTPUTS_WIDTH * oy;
 
@@ -1271,19 +1381,13 @@ static void convcellPropagate1(
             }
 
             /*
-             * ========================================================
-             * Output filter 0
-             * ========================================================
+             * Output filter 0:
+             *   1. Check the actual input alignment.
+             *   2. Execute one MAC16 operation.
+             *   3. Fill the hardware input buffer with the current 4x4 patch.
              *
-             * output 0负责：
-             *
-             *   1. 根据实际input地址检查alignment；
-             *   2. 执行MAC16计算；
-             *   3. 同时把4×4 input patch写进硬件buffer。
-             *
-             * 注意：
-             *
-             * alignment只在这里检查一次。
+             * Alignment is checked only on this path because later filters reuse
+             * the buffered input data.
              */
             {
                 const int output = 0;
@@ -1303,9 +1407,8 @@ static void convcellPropagate1(
 
                     if (input_alignment == 0u) {
                         /*
-                        * 4-byte aligned：
-                        * 每行直接使用一个lw。
-                        */
+                         * 4-byte-aligned input: load one 32-bit word per row.
+                         */
                         weightedSum =
                             mac16buf_para_conv1_aligned(
                                 row0,
@@ -1318,9 +1421,9 @@ static void convcellPropagate1(
                     }
                     else if (input_alignment == 2u) {
                         /*
-                        * 地址为2 mod 4：
-                        * 每行使用两个lhu拼接。
-                        */
+                         * Address is 2 mod 4: reconstruct each row with two
+                         * halfword loads.
+                         */
                         weightedSum = 
                             mac16buf_para_conv1_unaligned2(
                                 row0,
@@ -1334,9 +1437,9 @@ static void convcellPropagate1(
                 } else {
                     if (input_alignment == 0u) {
                         /*
-                        * 4-byte aligned：
-                        * 每行直接使用一个lw。
-                        */
+                         * 4-byte-aligned input: load one 32-bit word per row.
+                         * Weights are read from the local weight buffer.
+                         */
                         weightedSum = 
                             mac16buf_para_conv1_aligned_wbuf(
                                 row0,
@@ -1348,9 +1451,9 @@ static void convcellPropagate1(
                     }
                     else if (input_alignment == 2u) {
                         /*
-                        * 地址为2 mod 4：
-                        * 每行使用两个lhu拼接。
-                        */
+                         * Address is 2 mod 4: reconstruct each row with two
+                         * halfword loads. Weights come from the local buffer.
+                         */
                        weightedSum = 
                             mac16buf_para_conv1_unaligned2_wbuf(
                                 row0,
@@ -1361,30 +1464,17 @@ static void convcellPropagate1(
                             );
                     }
                 }
-                
-                // outputs[output_offset + output]
-                //     = sat(
-                //         weightedSum,
-                //         output,
-                //         ACTIVATION,
-                //         rescaling
-                //     );
+                /* Conv1 final MAC already returns ReLU >> 8, saturated to u8. */
                 outputs[output_offset + output] = (UDATA_T)weightedSum;
             }
 
             /*
-             * ========================================================
-             * Output filters 1～NB_OUTPUTS-1
-             * ========================================================
-             *
-             * output 0已经将当前input patch写入硬件buffer。
-             *
-             * 因此这里：
-             *
-             *   - 不再访问原始input；
-             *   - 不再检查input alignment；
-             *   - 只加载当前filter的16个weights；
-             *   - 执行一条mac16buf。
+             * Output filters 1..NB_OUTPUTS-1:
+             *   - the current input patch is already buffered by output filter 0;
+             *   - no further input-memory access or alignment check is required;
+             *   - only the corresponding weights are supplied (or read from the
+             *     weight buffer);
+             *   - one MAC16BUF instruction produces each Conv1 output.
              */
             const WDATA_T* filter_weights
                 = weights + filter_size;
@@ -1406,14 +1496,7 @@ static void convcellPropagate1(
                         &weightedSum
                     );
                 }
-
-                // outputs[output_offset + output]
-                //     = sat(
-                //         weightedSum,
-                //         output,
-                //         ACTIVATION,
-                //         rescaling
-                //     );
+                /* Conv1 final MAC already returns ReLU >> 8, saturated to u8. */
                 outputs[output_offset + output] = (UDATA_T)weightedSum;
             }
         }
@@ -1456,13 +1539,18 @@ static void convcellPropagate2(
 
     buffer4_setmode_conv2();
     /*
-     * Conv2 的 buffer 策略：
-     *   - Conv2 kernel = 5x5x16 = 400 byte = 25 个 16-byte block。
-     *   - 对同一个 output pixel (ox, oy)，完整 400-byte input patch
-     *     对 24 个 output filters 都相同。
-     *   - 所以先连续执行 25 次 buf4 x24，把完整 input patch 存进硬件 buffer。
-     *   - 然后每个 output filter 执行 25 次 mac16buf。
-     *   - 硬件 active_blocks=25，所以 25 次 mac16buf 后 read counter 自动回到 0。
+     * Conv2 buffering strategy:
+     *   - One 5x5x16 patch = 400 bytes = 25 x 16-byte blocks.
+     *   - BUF4 configures active_blocks = 25 once for the layer.
+     *   - For every spatial position, output filter 0 executes 25
+     *     MAC16BUF_PARA operations.  Those operations compute filter 0 while
+     *     filling the complete input buffer; filters 1..23 then reuse the same
+     *     25 input blocks through MAC16BUF.
+     *   - At the first spatial position only, all 24 x 25 = 600 Conv2 weight
+     *     blocks are captured while the outputs are computed.  Later spatial
+     *     positions read those weights from the local weight buffer.
+     *   - The local accumulator keeps the 25 partial MAC16 blocks inside the
+     *     coprocessor and only the final block writes the completed output.
      */
 
     for (int oy = 0; oy < OUTPUTS_HEIGHT; ++oy) {
@@ -1475,7 +1563,7 @@ static void convcellPropagate2(
         const int iy = (oy * STRIDE_Y) - PADDING_Y;
 
         for (int ox = 0; ox < OUTPUTS_WIDTH; ++ox) {
-            // In the first output, we capture the weight
+            /* Capture the complete Conv2 weight set only at the first spatial position. */
             const int capture_weight = (oy == 0 && ox == 0);
 
             const int sxMin = (PADDING_X == 0) ? 0
@@ -1489,31 +1577,22 @@ static void convcellPropagate2(
 
             const int oPos = (ox + OUTPUTS_WIDTH * oy);
             int oOffset = OUTPUT_MEM_STRIDE * oPos;
-
-            // if (OUTPUT_MEM_WRAP_SIZE > 0 && oOffset >= OUTPUT_MEM_CONT_SIZE) {
-            //     oOffset += OUTPUT_MEM_WRAP_OFFSET - OUTPUT_MEM_CONT_OFFSET
-            //                 - OUTPUT_MEM_CONT_SIZE;
-            // }
+            /* The generated Conv2 output layout is contiguous in this final network. */
                 /*
-                 * 填满完整 Conv2 patch。
-                 * 连续 25 次 buf4 x24：
-                 *   block0, block1, ..., block24
-                 * 写完后硬件 write counter 自动回到 0。
+                 * The current Conv2 patch is filled block by block by the
+                 * MAC16BUF_PARA operations executed for output filter 0.
                  */
             const int kernel_blocks = 25;   // Conv2 = 25
 
             /*
-            * ============================================================
-            * output filter 0:
-            * 使用 MAC16BUF_PARA。
-            *
-            * 每个 block 同时做两件事：
-            *   1. 用当前 input block + weight block 做 MAC16
-            *   2. 把当前 input block 写进硬件 input_buffer
-            *
-            * 所以 output 0 算完之后，input_buffer 也已经完整保存了 25 个 blocks。
-            * ============================================================
-            */
+             * Output filter 0:
+             * each MAC16BUF_PARA block performs two operations simultaneously:
+             *   1. MAC16(input block, weight block)
+             *   2. store the current input block in the hardware input buffer
+             *
+             * After 25 blocks, both the first output and the full input-buffer
+             * contents for this spatial position are available.
+             */
             {
                 const int output = 0;
                 SUM_T weightedSum = biasses[output];
@@ -1571,20 +1650,16 @@ static void convcellPropagate2(
                         ++block;
                     }
                 }
-
-                // outputs[oOffset + output]
-                //     = sat(weightedSum, output, ACTIVATION, rescaling);
+                /* Conv2 final MAC already returns ReLU >> 8, saturated to u8. */
                 outputs[oOffset + output] = (UDATA_T)weightedSum;
             }
 
 
             /*
-            * ============================================================
-            * output filter 1..NB_OUTPUTS-1:
-            * 这里 input_buffer 已经由 output 0 的 MAC16BUF_PARA 填满。
-            * 所以后面的 filters 继续用原来的 MAC16BUF 逻辑。
-            * ============================================================
-            */
+             * Output filters 1..NB_OUTPUTS-1:
+             * the input buffer has already been filled by output filter 0, so
+             * these filters use MAC16BUF and reuse the buffered input blocks.
+             */
             const WDATA_T* filter_weights
                 = weights + 400;
 
@@ -1603,14 +1678,7 @@ static void convcellPropagate2(
                         &weightedSum
                     );
                 }
-
-                // outputs[oOffset + output]
-                //     = sat(
-                //         weightedSum,
-                //         output,
-                //         ACTIVATION,
-                //         rescaling
-                //     );
+                /* Conv2 final MAC already returns ReLU >> 8, saturated to u8. */
                 outputs[oOffset + output] = (UDATA_T)weightedSum;                
             }
         }
@@ -1643,23 +1711,24 @@ static void fccellPropagateUDATA_T(
     int OUTPUT_MEM_STRIDE)
 {
     /*
-     * FC1 的 buffer 策略：
-     *   - FC1 input = Conv2 output = 24x4x4 = 384 byte。
-     *   - 384 byte = 24 个 16-byte block。
-     *   - 先执行 24 次 buf4 x23，把整个 FC1 input 存进硬件 input buffer。
-     *   - 然后每个 output neuron 执行 24 次 mac16buf。
-     *   - 硬件 active_blocks=24，所以每个 neuron 算完后 read counter 自动回到 0。
-     *
-     * 如果输入布局不满足连续/对齐要求，就走原始 scalar fallback。
+     * FC1 buffering strategy:
+     *   - FC1 input = 24 x 4 x 4 = 384 bytes = 24 x 16-byte blocks.
+     *   - BUF4 configures active_blocks = 24 once.
+     *   - Neuron 0 computes with MAC16BUF_PARA and fills all 24 input-buffer
+     *     blocks at the same time.
+     *   - Neurons 1..63 reuse those input blocks with MAC16BUF.
+     *   - FC1 weights are not buffered: each neuron supplies its own 384-byte
+     *     weight vector from software.
+     *   - Hardware applies ReLU, >>8 and u8 saturation on the final block.
      */
     const int total_inputs = NB_CHANNELS * CHANNELS_WIDTH * CHANNELS_HEIGHT;
     buffer4_setmode_fc1();
 
     /*
-    * FC1 input = 384 bytes = 24 blocks.
-    * output0 用 PARA 填 buffer。
-    * output1..NB_OUTPUTS-1 复用 buffer。
-    */
+     * FC1 input = 384 bytes = 24 blocks.
+     * Neuron 0 fills the input buffer through the PARA path; later neurons
+     * reuse the buffered inputs.
+     */
     const WDATA_T* neuron_weights = weights;
     for (int och = 0; och < NB_OUTPUTS; och++) {
         SUM_T weightedSum = biasses[och];
@@ -1668,18 +1737,14 @@ static void fccellPropagateUDATA_T(
 
         if (och == 0) {
 
-            /*
-            * block 0
-            */
+            /* Block 0: first. */
             mac16buf_para_first(
                 inputs,
                 weights + wBase,
                 &weightedSum
             );
 
-            /*
-            * blocks 1..20
-            */
+            /* Blocks 1..20, unrolled four at a time. */
             mac16buf_para_middle4(
                 inputs + 16,
                 weights + wBase + 16
@@ -1705,9 +1770,7 @@ static void fccellPropagateUDATA_T(
                 weights + wBase + 272
             );                                  // blocks 17..20
 
-            /*
-            * blocks 21、22
-            */
+            /* Blocks 21 and 22. */
             mac16buf_para_middle(
                 inputs + 336,
                 weights + wBase + 336
@@ -1718,9 +1781,7 @@ static void fccellPropagateUDATA_T(
                 weights + wBase + 352
             );
 
-            /*
-            * block 23
-            */
+            /* Block 23: final. */
             mac16buf_para_final(
                 inputs + 368,
                 weights + wBase + 368,
@@ -1728,17 +1789,14 @@ static void fccellPropagateUDATA_T(
             );
         } else {
             /*
-            * output1..NB_OUTPUTS-1:
-            * input_buffer 已经由 output0 填满。
-            * 直接用 mac16buf 计算。
-            */
+             * Neurons 1..NB_OUTPUTS-1 reuse the input buffer filled by neuron 0.
+             */
             mac16buf_fc1_24blocks(
                 neuron_weights,
                 &weightedSum
             );
         }
-
-        // outputs[och] = sat(weightedSum, och, ACTIVATION, rescaling);
+        /* FC1 final MAC already returns ReLU >> 8, saturated to u8. */
         outputs[och] = (UDATA_T)weightedSum;
         neuron_weights += 384;
     }
@@ -1771,56 +1829,39 @@ static void fccellPropagateDATA_T(
     int OUTPUT_MEM_STRIDE)
 {
     /*
-     * FC2:
+     * FC2 acceleration:
+     *   - Total input size: 150 bytes.
+     *   - First 144 bytes: 9 MAC16 blocks.
+     *   - Remaining 6 bytes: scalar MAC operations.
      *
-     * input = 150 bytes
+     * Output 0 uses MAC16BUF_PARA to compute while filling the 9 input-buffer
+     * blocks. Outputs 1..9 reuse these buffered inputs with MAC16BUF.  FC2
+     * weights are not stored in the hardware weight buffer.
      *
-     * 前144 bytes:
-     *     9 × MAC16BUF
+     * Unlike Conv1/Conv2/FC1, active_blocks = 9 disables hardware
+     * post-processing.  The final MAC16 block returns the full 32-bit partial
+     * sum, software adds inputs 144..149, and sat() is applied only after those
+     * six scalar terms have been included.
      *
-     * 最后6 bytes:
-     *     scalar
-     *
-     * 优化：
-     *
-     * output 0:
-     *     使用MAC16BUF_PARA，
-     *     一边计算，一边填充9个input buffer blocks。
-     *
-     * output 1..9:
-     *     直接复用input buffer。
-     *
-     * 对weight:
-     *     addr % 4 == 0 -> 普通lw版本
-     *     addr % 4 == 2 -> offset2 halfword版本
+     * Weight alignment:
+     *   - address % 4 == 0 : regular 32-bit load path
+     *   - address % 4 == 2 : halfword reconstruction path
      */
     const int total_inputs
         = NB_CHANNELS * CHANNELS_WIDTH * CHANNELS_HEIGHT;
 
     /*
-     * 非常重要：
-     *
-     * 设置active_blocks = 9。
-     *
-     * 之前你是通过连续9条buf4 x8来完成mode设置+
-     * buffer填充。
-     *
-     * 现在buffer填充交给output0的MAC16BUF_PARA，
-     * 所以这里只需要设置一次mode。
+     * Configure active_blocks = 9 once for FC2.
+     * Buffer filling is performed by the MAC16BUF_PARA sequence of output 0.
      */
     buffer4_setmode_fc2();
 
 
     /*
-     * ============================================================
-     * OUTPUT 0
-     * ============================================================
-     *
-     * output0的weights从整个fc2_weights起始地址开始，
-     * 正常情况下这里4-byte aligned。
-     *
-     * 使用PARA：
-     *   calculation + input buffer filling
+     * Output 0:
+     * its weight array starts at the base of fc2_weights and is normally
+     * 4-byte aligned. The PARA path computes the output and fills the input
+     * buffer simultaneously.
      */
     {
         const int och = 0;
@@ -1838,9 +1879,7 @@ static void fccellPropagateDATA_T(
         );
 
         /*
-         * blocks 1..7: middle
-         *
-         * 这里直接展开，不再写block循环。
+         * Blocks 1..7: middle blocks, explicitly unrolled.
          */
         mac16buf_para_middle(
             inputs + 16,
@@ -1878,11 +1917,9 @@ static void fccellPropagateDATA_T(
         );
 
         /*
-         * block 8: final
-         *
-         * 结束时：
-         *   - local accumulator写回weightedSum；
-         *   - input buffer已经完整保存144 bytes。
+         * Block 8: final block.
+         * The local accumulator is written back to weightedSum and all
+         * 144 buffered input bytes are now available for the next outputs.
          */
         mac16buf_para_final(
             inputs + 128,
@@ -1891,9 +1928,7 @@ static void fccellPropagateDATA_T(
         );
 
         /*
-         * 剩余6个inputs：144..149。
-         *
-         * 直接展开，避免一个只有6次的循环。
+         * Remaining inputs 144..149 are handled with scalar MAC operations.
          */
         weightedSum += inputs[144] * weights[wBase + 144];
         weightedSum += inputs[145] * weights[wBase + 145];
@@ -1902,6 +1937,7 @@ static void fccellPropagateDATA_T(
         weightedSum += inputs[148] * weights[wBase + 148];
         weightedSum += inputs[149] * weights[wBase + 149];
 
+        /* FC2 completes six scalar MACs in software, so saturation stays here. */
         outputs[och]
             = sat(weightedSum, och, ACTIVATION, rescaling);
         
@@ -1909,13 +1945,9 @@ static void fccellPropagateDATA_T(
 
 
     /*
-     * ============================================================
-     * OUTPUT 1 .. NB_OUTPUTS-1
-     * ============================================================
-     *
-     * input_buffer已经由output0填好。
-     *
-     * 后续outputs只需要读取weights。
+     * Outputs 1..NB_OUTPUTS-1:
+     * reuse the input buffer filled while output 0 was computed. Only weights
+     * need to be supplied from software.
      */
     for (int och = 1; och < NB_OUTPUTS; ++och) {
 
@@ -1954,9 +1986,7 @@ static void fccellPropagateDATA_T(
                 weight_ptr + 16
             );
 
-            /*
-             * blocks 5、6、7
-             */
+            /* Blocks 5, 6 and 7. */
             mac16buf_middle(
                 weight_ptr + 80
             );
@@ -1980,14 +2010,11 @@ static void fccellPropagateDATA_T(
 
 
         /*
-         * ========================================================
-         * CASE 2:
-         * Weight address = 2 mod 4
-         * ========================================================
+         * Case 2: weight address is 2 mod 4.
          *
-         * 这是FC2中output 1、3、5、7、9正常会出现的情况。
-         *
-         * 不再整层scalar fallback。
+         * With a 150-byte weight vector, this alignment occurs naturally for
+         * alternating FC2 output neurons. Halfword loads reconstruct each
+         * 32-bit weight word instead of falling back to a scalar implementation.
          */
         else if (weight_alignment == 2u) {
 
@@ -2039,11 +2066,7 @@ static void fccellPropagateDATA_T(
             );
         }
         /*
-         * ========================================================
-         * 剩余6项
-         * ========================================================
-         *
-         * 对齐与offset2两种MAC16路径都在这里统一处理。
+         * Remaining six scalar terms, shared by both weight-alignment paths.
          */
         weightedSum += inputs[144] * weight_ptr[144];
         weightedSum += inputs[145] * weight_ptr[145];
@@ -2053,6 +2076,7 @@ static void fccellPropagateDATA_T(
         weightedSum += inputs[149] * weight_ptr[149];
 
 
+        /* FC2 completes six scalar MACs in software, so saturation stays here. */
         outputs[och]
             = sat(
                 weightedSum,
@@ -2085,11 +2109,7 @@ static void maxPropagate1(
         for (int ix = 0; ix < INPUTS_WIDTH; ++ix) {
             const int oPos = (ix + INPUTS_WIDTH * iy);
             int iOffset = INPUT_MEM_STRIDE * oPos;
-
-            // if (INPUT_MEM_WRAP_SIZE > 0 && iOffset >= INPUT_MEM_CONT_SIZE) {
-            //     iOffset += INPUT_MEM_WRAP_OFFSET - INPUT_MEM_CONT_OFFSET
-            //                 - INPUT_MEM_CONT_SIZE;
-            // }
+            /* The final FC2 output layout is contiguous; no wrap adjustment is used here. */
 
             if (NB_CHANNELS > 1) {
                 for (int ch = 0; ch < NB_CHANNELS; ++ch) {
@@ -2130,8 +2150,6 @@ void propagate(const UDATA_T* inputs, Target_T* outputs, UDATA_T* maxPropagate_v
     CONV1_KERNEL_WIDTH, CONV1_ACTIVATION, ENV_MEM_CONT_OFFSET, ENV_MEM_CONT_SIZE, ENV_MEM_WRAP_OFFSET, 
     ENV_MEM_WRAP_SIZE, ENV_MEM_STRIDE, CONV1_MEM_CONT_OFFSET, CONV1_MEM_CONT_SIZE, CONV1_MEM_WRAP_OFFSET, CONV1_MEM_WRAP_SIZE, CONV1_MEM_STRIDE);
 
-    //convcellPropagate1(inputs , conv1_output, conv1_biases, conv1_weights, CONV1_SCALING);
-
 #ifdef BENCHMARK
     const Tick_T end_conv1 = tick();
     static RunningMean_T conv1_timing = {0.0, 0};
@@ -2162,8 +2180,6 @@ void propagate(const UDATA_T* inputs, Target_T* outputs, UDATA_T* maxPropagate_v
     CONV1_MEM_CONT_SIZE, CONV1_MEM_WRAP_OFFSET, CONV1_MEM_WRAP_SIZE, 
     CONV1_MEM_STRIDE, CONV2_MEM_CONT_OFFSET, CONV2_MEM_CONT_SIZE, CONV2_MEM_WRAP_OFFSET, 
     CONV2_MEM_WRAP_SIZE, CONV2_MEM_STRIDE);
-
-    //convcellPropagate2(conv1_output , conv2_output, conv2_biases, conv2_weights, CONV2_SCALING);
 
 #ifdef BENCHMARK
     const Tick_T end_conv2 = tick();
@@ -2239,12 +2255,6 @@ void propagate(const UDATA_T* inputs, Target_T* outputs, UDATA_T* maxPropagate_v
     saveOutputs(FC2_NB_OUTPUTS, FC2_OUTPUTS_HEIGHT, FC2_OUTPUTS_WIDTH, FC2_MEM_CONT_OFFSET, FC2_MEM_CONT_SIZE, FC2_MEM_WRAP_OFFSET, FC2_MEM_WRAP_SIZE, FC2_MEM_STRIDE, fc2_output , fc2_stream, Network::Format::CHW);
     fclose(fc2_stream);
 #endif
-//modifcation debug
-    // printf("fc2_output = ");
-    // for (int i = 0; i < 10; i++) {
-    //     printf("%d ", fc2_output[i]);
-    // }
-    // printf("\n");
     maxPropagate1(fc2_output, outputs, maxPropagate_val, FC2_NB_OUTPUTS, FC2_OUTPUTS_HEIGHT, FC2_OUTPUTS_WIDTH, FC2_MEM_CONT_OFFSET, FC2_MEM_CONT_SIZE, FC2_MEM_WRAP_OFFSET, FC2_MEM_WRAP_SIZE, FC2_MEM_STRIDE);
 
 #ifdef SAVE_OUTPUTS
@@ -2255,12 +2265,3 @@ void propagate(const UDATA_T* inputs, Target_T* outputs, UDATA_T* maxPropagate_v
 
 }
 
-/*template<>
-float Network::backpropagate(const DATA_T* input, const std::int32_t* labels){
-   const float loss = 0.0f;
-   return loss;
- }
-
-int Network::gradientCheck(){
-   return(0);
-}*/

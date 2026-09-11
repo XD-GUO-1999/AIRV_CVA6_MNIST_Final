@@ -72,7 +72,7 @@ package ariane_pkg;
   localparam REG_ADDR_SIZE = 5;
 
   // Read ports for general purpose register files
-  localparam NR_RGPR_PORTS = 9;  // modification: we need 9 read ports for MAC16buf_PARA, 4 for inputs, and 4 for weight, 1 for rd
+  localparam NR_RGPR_PORTS = 9;  // Final accelerator path: rs1/rs2 + 2 extra weight regs + rd/bias + x28-x31 input regs
 
   // static debug hartinfo
   // debug causes
@@ -443,12 +443,11 @@ package ariane_pkg;
     MULHU,
     MULHSU,
     MULW,
-    //modification
+    // MNIST accelerator operations
     MAC16BUF,
     MAC16BUF_PARA,
     BUF4,
-    //modification
-  
+
     // Divisions
     DIV,
     DIVU,
@@ -578,7 +577,10 @@ package ariane_pkg;
     riscv::xlen_t             operand_a;
     riscv::xlen_t             operand_b;
     riscv::xlen_t             imm;
-    //modification
+
+    // Additional integer source operands carried from issue/read-operands to
+    // CV-X-IF. Together with operand_a, operand_b and the rd/bias source, these
+    // complete the nine-GPR operand set required by MAC16BUF_PARA.
     riscv::xlen_t             operand_d;
     riscv::xlen_t             operand_e;
     riscv::xlen_t             operand_f;

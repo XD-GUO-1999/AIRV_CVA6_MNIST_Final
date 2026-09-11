@@ -10,8 +10,10 @@
 //
 // Author: Florian Zaruba, ETH Zurich
 // Date: 08.04.2017
-// Description: Issues instruction from the scoreboard and fetches the operands
-//              This also includes all the forwarding logic
+// Description: Issues instructions from the scoreboard and fetches/forwards
+//              their operands.  The final MNIST accelerator extends the integer
+//              register-file path to nine read ports so MAC16BUF_PARA can receive
+//              four weight words, rd/bias, and four input words in one issue.
 
 
 module issue_read_operands
@@ -40,7 +42,8 @@ module issue_read_operands
     output logic [REG_ADDR_SIZE-1:0] rs3_o,
     input rs3_len_t rs3_i,
     input logic rs3_valid_i,
-    // modification: extra source register operands for MAC16BUF/BUF4/MAC16BUF_PARA
+    // Additional GPR source ports used by the accelerator.  rs4/rs5 come from
+    // instruction_o.result[4:0]/[9:5]; rs6..rs9 are x28..x31 for PARA input.
     output logic [REG_ADDR_SIZE-1:0] rs4_o,
     input riscv::xlen_t rs4_i,
     input logic rs4_valid_i,
@@ -105,16 +108,26 @@ module issue_read_operands
 );
   logic stall;
   logic fu_busy;  // functional unit is busy
-  riscv::xlen_t operand_a_regfile, operand_b_regfile;  // Operands coming from the regfile
-  // modification: extra operand values from the regfile for MAC16BUF/BUF4/MAC16BUF_PARA
-  riscv::xlen_t operand_d_regfile, operand_e_regfile, operand_f_regfile, operand_g_regfile,operand_h_regfile, operand_i_regfile;
-  //
+  riscv::xlen_t operand_a_regfile, operand_b_regfile;  // Operands coming from the register file
+  // Accelerator operands read through GPR ports 3..8. Keep these grouped with
+  // their ID/EX pipeline registers below so the nine-port path is easy to trace.
+  riscv::xlen_t operand_d_regfile;
+  riscv::xlen_t operand_e_regfile;
+  riscv::xlen_t operand_f_regfile;
+  riscv::xlen_t operand_g_regfile;
+  riscv::xlen_t operand_h_regfile;
+  riscv::xlen_t operand_i_regfile;
+
   rs3_len_t operand_c_regfile, operand_c_fpr, operand_c_gpr;  // Third operand from the FP regfile or GP regfile when NR_RGPR_PORTS == 3
   // output flipflop (ID <-> EX)
   riscv::xlen_t operand_a_n, operand_a_q, operand_b_n, operand_b_q, imm_n, imm_q, imm_forward_rs3;
-  riscv::xlen_t operand_d_n, operand_d_q, operand_e_n, operand_e_q; // modification: extra operands for the MAC16BUF/BUF4/MAC16BUF_PARA path
-  riscv::xlen_t operand_f_n, operand_f_q, operand_g_n, operand_g_q;
-  riscv::xlen_t operand_h_n, operand_h_q, operand_i_n, operand_i_q;
+  // ID/EX pipeline registers for the six additional accelerator operands.
+  riscv::xlen_t operand_d_n, operand_d_q;
+  riscv::xlen_t operand_e_n, operand_e_q;
+  riscv::xlen_t operand_f_n, operand_f_q;
+  riscv::xlen_t operand_g_n, operand_g_q;
+  riscv::xlen_t operand_h_n, operand_h_q;
+  riscv::xlen_t operand_i_n, operand_i_q;
 
   logic        alu_valid_q;
   logic        mult_valid_q;
@@ -133,8 +146,9 @@ module issue_read_operands
 
   // Forwarding signals
   logic forward_rs1, forward_rs2, forward_rs3;
-  // modification: forwarding for the extra source registers
-  logic forward_rs4, forward_rs5, forward_rs6, forward_rs7, forward_rs8, forward_rs9;
+  // Forwarding signals for the additional accelerator source registers.
+  logic forward_rs4, forward_rs5, forward_rs6;
+  logic forward_rs7, forward_rs8, forward_rs9;
 
   // original instruction stored in tval
   riscv::instruction_t orig_instr;
@@ -147,7 +161,7 @@ module issue_read_operands
 
   assign fu_data_o.operand_a = operand_a_q;
   assign fu_data_o.operand_b = operand_b_q;
-  // modification: connect the extra operands to the FU data output
+  // Forward the additional operands to the execution-stage FU data bundle.
   assign fu_data_o.operand_d = operand_d_q;
   assign fu_data_o.operand_e = operand_e_q;
   assign fu_data_o.operand_f = operand_f_q;
@@ -201,7 +215,7 @@ module issue_read_operands
     forward_rs1 = 1'b0;
     forward_rs2 = 1'b0;
     forward_rs3 = 1'b0;  // FPR only
-    // modification: initialize extra forwarding signals for MAC16BUF/BUF4/MAC16BUF_PARA
+    // Default: no forwarding on the additional accelerator operands.
     forward_rs4 = 1'b0;
     forward_rs5 = 1'b0;
     forward_rs6 = 1'b0;
@@ -210,9 +224,12 @@ module issue_read_operands
     forward_rs9 = 1'b0;
     //
     // poll the scoreboard for those values
+    // ------------------------------------------------------------------------
+    // Accelerator source-register address selection
+    // ------------------------------------------------------------------------
     rs1_o = issue_instr_i.rs1;
     rs2_o = issue_instr_i.rs2;
-    // modification: for MAC16BUF, use rd as the third source register.
+    // MAC16BUF/MAC16BUF_PARA use rd as the accumulator source (third operand).
     rs3_o = (issue_instr_i.op == ariane_pkg::MAC16BUF || issue_instr_i.op == ariane_pkg::MAC16BUF_PARA) ? issue_instr_i.rd[REG_ADDR_SIZE-1:0] : issue_instr_i.result[REG_ADDR_SIZE-1:0];
     rs4_o = '0;
     rs5_o = '0;
@@ -239,7 +256,7 @@ module issue_read_operands
       rs8_o = '0;
       rs9_o = '0;
     end
-   //////
+
     // 0. check that we are not using the zimm type in RS1
     //    as this is an immediate we do not have to wait on anything here
     // 1. check if the source registers are clobbered --> check appropriate clobber list (gpr/fpr)
@@ -280,10 +297,10 @@ module issue_read_operands
     if ((CVA6Cfg.FpPresent && is_imm_fpr(
             issue_instr_i.op
         )) ? rd_clobber_fpr_i[issue_instr_i.result[REG_ADDR_SIZE-1:0]] != NONE :
-        // modification: include MAC16BUF when five gp register ports are available
+        // MAC16BUF/MAC16BUF_PARA require dependency tracking on rd when nine GPR read ports are enabled.
             (issue_instr_i.op == OFFLOAD || issue_instr_i.op == ariane_pkg::MAC16BUF || issue_instr_i.op == ariane_pkg::MAC16BUF_PARA ) && CVA6Cfg.NrRgprPorts == 9 ?
             rd_clobber_gpr_i[(issue_instr_i.op == ariane_pkg::MAC16BUF || issue_instr_i.op == ariane_pkg::MAC16BUF_PARA) ? issue_instr_i.rd[REG_ADDR_SIZE-1:0] : issue_instr_i.result[REG_ADDR_SIZE-1:0]] != NONE : 0) begin
-        // modification: for MAC16BUF and OFFLOAD, check whether the third operand is available.
+        // Check whether the third GPR operand is available for forwarding.
       // If the operand is available, forward it. CSRs do not write to/from FPR, so no extra check is needed.
       if (rs3_valid_i) begin
         forward_rs3 = 1'b1;
@@ -291,7 +308,7 @@ module issue_read_operands
         stall = 1'b1;
       end
     end
-    // modification: check forwarding for the extra source registers.
+    // Check dependencies and forwarding for the additional accelerator operands.
     if (issue_instr_i.op == ariane_pkg::MAC16BUF || issue_instr_i.op == ariane_pkg::BUF4 || issue_instr_i.op == ariane_pkg::MAC16BUF_PARA) begin
       if(rd_clobber_gpr_i[rs4_o] != NONE)begin
           if(rs4_valid_i) forward_rs4 = 1'b1;
@@ -326,7 +343,7 @@ module issue_read_operands
     end
   end
 
-  // modification: third operand comes from the GP regfile when NR_RGPR_PORTS == 9, otherwise from FP regfile
+  // With nine GPR read ports, the third operand is read from the integer register file.
   if (CVA6Cfg.NrRgprPorts == 9) begin : gen_gp_rs3
       assign imm_forward_rs3 = rs3_i;
   end else begin : gen_fp_rs3
@@ -338,7 +355,7 @@ module issue_read_operands
     // default is regfiles (gpr or fpr)
     operand_a_n = operand_a_regfile;
     operand_b_n = operand_b_regfile;
-    // modification: include extra operand sources in the forwarding/selection mux
+    // Default values for the additional accelerator operands come from the register file.
     operand_d_n = operand_d_regfile;
     operand_e_n = operand_e_regfile;
     operand_f_n = operand_f_regfile;
@@ -351,7 +368,7 @@ module issue_read_operands
     if (CVA6Cfg.NrRgprPorts == 9) begin
       imm_n = (CVA6Cfg.FpPresent && is_imm_fpr(issue_instr_i.op)) ?
           {{riscv::XLEN - CVA6Cfg.FLen{1'b0}}, operand_c_regfile} :
-          (issue_instr_i.op == OFFLOAD || issue_instr_i.op == ariane_pkg::MAC16BUF || issue_instr_i.op == ariane_pkg::MAC16BUF_PARA) ? operand_c_regfile : issue_instr_i.result; // modification: support MAC16BUF compressed immediate selection
+          (issue_instr_i.op == OFFLOAD || issue_instr_i.op == ariane_pkg::MAC16BUF || issue_instr_i.op == ariane_pkg::MAC16BUF_PARA) ? operand_c_regfile : issue_instr_i.result; // Use rd value as the MAC accumulator source
     end else begin
       imm_n = (CVA6Cfg.FpPresent && is_imm_fpr(issue_instr_i.op)) ?
           {{riscv::XLEN - CVA6Cfg.FLen{1'b0}}, operand_c_regfile} : issue_instr_i.result;
@@ -371,7 +388,7 @@ module issue_read_operands
     if (forward_rs3) begin
       imm_n = imm_forward_rs3;
     end
-    // modification: forward extra source operands when available
+    // Select forwarded values when a producer result is available.
     if (forward_rs4) begin
       operand_d_n = rs4_i;
     end
@@ -575,20 +592,26 @@ module issue_read_operands
   logic [CVA6Cfg.NrCommitPorts-1:0][riscv::XLEN-1:0] wdata_pack;
   logic [CVA6Cfg.NrCommitPorts-1:0]                  we_pack;
 
-  if (CVA6Cfg.NrRgprPorts == 9) begin : gen_rs3 // modification: use 9 read ports for MAC16BUF/BUF4/MAC16BUF_PARA, otherwise use 3 read ports for the third operand
-  assign raddr_pack = {
+  // --------------------------------------------------------------------------
+  // Nine-port integer-register mapping
+  // --------------------------------------------------------------------------
+  // rdata[0] = rs1, rdata[1] = rs2, rdata[2] = rd/bias,
+  // rdata[3:4] = the two extra weight registers encoded in result[9:0],
+  // rdata[5:8] = x28, x29, x30, x31 for MAC16BUF_PARA input words.
+  if (CVA6Cfg.NrRgprPorts == 9) begin : gen_rs3 // Full accelerator path
+    assign raddr_pack = {
         (issue_instr_i.op == ariane_pkg::MAC16BUF_PARA) ? 5'd31 : 5'd0,
         (issue_instr_i.op == ariane_pkg::MAC16BUF_PARA) ? 5'd30 : 5'd0,
         (issue_instr_i.op == ariane_pkg::MAC16BUF_PARA) ? 5'd29 : 5'd0,
         (issue_instr_i.op == ariane_pkg::MAC16BUF_PARA) ? 5'd28 : 5'd0,
-        (issue_instr_i.op == ariane_pkg::MAC16BUF || issue_instr_i.op == ariane_pkg::BUF4 || issue_instr_i.op == ariane_pkg::MAC16BUF_PARA) ? issue_instr_i.result[9:5] : 5'd0, // modification: if we use MAC16BUF, the 4th and 5th port will read x28 and x29 as rs4 and rs5, otherwise they read x0
-        (issue_instr_i.op == ariane_pkg::MAC16BUF || issue_instr_i.op == ariane_pkg::BUF4 || issue_instr_i.op == ariane_pkg::MAC16BUF_PARA) ? issue_instr_i.result[4:0] : 5'd0, // important; here we apply as rs5 rs4 rs3 rs2 rs1, the order is important
-        (issue_instr_i.op == ariane_pkg::MAC16BUF || issue_instr_i.op == ariane_pkg::BUF4 || issue_instr_i.op == ariane_pkg::MAC16BUF_PARA) ? issue_instr_i.rd[4:0] : issue_instr_i.result[4:0], // Port 3: rd/acc
-        issue_instr_i.rs2[4:0], // Port 2: rs2
-        issue_instr_i.rs1[4:0]  // Port 1: rs1
+        (issue_instr_i.op == ariane_pkg::MAC16BUF || issue_instr_i.op == ariane_pkg::BUF4 || issue_instr_i.op == ariane_pkg::MAC16BUF_PARA) ? issue_instr_i.result[9:5] : 5'd0, // Weight operand 4
+        (issue_instr_i.op == ariane_pkg::MAC16BUF || issue_instr_i.op == ariane_pkg::BUF4 || issue_instr_i.op == ariane_pkg::MAC16BUF_PARA) ? issue_instr_i.result[4:0] : 5'd0, // Weight operand 3
+        (issue_instr_i.op == ariane_pkg::MAC16BUF || issue_instr_i.op == ariane_pkg::BUF4 || issue_instr_i.op == ariane_pkg::MAC16BUF_PARA) ? issue_instr_i.rd[4:0] : issue_instr_i.result[4:0], // Port 2: rd / accumulator field
+        issue_instr_i.rs2[4:0], // Port 1: rs2
+        issue_instr_i.rs1[4:0]  // Port 0: rs1
   };
   end else if (CVA6Cfg.NrRgprPorts == 3) begin : gen_rs3
-    assign raddr_pack = (issue_instr_i.op == ariane_pkg::MAC16BUF) ? // modification: if MAC16BUF, port 3 reads rd to load rs3
+    assign raddr_pack = (issue_instr_i.op == ariane_pkg::MAC16BUF) ? // Legacy three-port MAC16BUF support: read rd as operand 3
                         {issue_instr_i.rd[4:0], issue_instr_i.rs2[4:0], issue_instr_i.rs1[4:0]} :
                         {issue_instr_i.result[4:0], issue_instr_i.rs2[4:0], issue_instr_i.rs1[4:0]};
   end else begin : gen_no_rs3
@@ -698,14 +721,17 @@ module issue_read_operands
   assign operand_b_regfile = (CVA6Cfg.FpPresent && is_rs2_fpr(
       issue_instr_i.op
   )) ? {{riscv::XLEN - CVA6Cfg.FLen{1'b0}}, fprdata[1]} : rdata[1];
-  assign operand_c_regfile = (CVA6Cfg.NrRgprPorts == 9) ? ((CVA6Cfg.FpPresent && is_imm_fpr(issue_instr_i.op)) ? operand_c_fpr : operand_c_gpr) : operand_c_fpr;
-  // modification: use the GP regfile for the extra operand paths when five register ports are enabled.
-  assign operand_d_regfile = (CVA6Cfg.NrRgprPorts == 9) ? rdata[3] : 0; // Connect rdata[3] (rs4) to operand_d_regfile.
-  assign operand_e_regfile = (CVA6Cfg.NrRgprPorts == 9) ? rdata[4] : 0;
-  assign operand_f_regfile = (CVA6Cfg.NrRgprPorts == 9) ? rdata[5] : 0;
-  assign operand_g_regfile = (CVA6Cfg.NrRgprPorts == 9) ? rdata[6] : 0;
-  assign operand_h_regfile = (CVA6Cfg.NrRgprPorts == 9) ? rdata[7] : 0;
-  assign operand_i_regfile = (CVA6Cfg.NrRgprPorts == 9) ? rdata[8] : 0;
+  assign operand_c_regfile = (CVA6Cfg.NrRgprPorts == 9)
+      ? ((CVA6Cfg.FpPresent && is_imm_fpr(issue_instr_i.op)) ? operand_c_fpr : operand_c_gpr)
+      : operand_c_fpr;
+
+  // Map the nine integer read-port outputs to the accelerator operand bundle.
+  assign operand_d_regfile = (CVA6Cfg.NrRgprPorts == 9) ? rdata[3] : 0;  // weight word 2
+  assign operand_e_regfile = (CVA6Cfg.NrRgprPorts == 9) ? rdata[4] : 0;  // weight word 3
+  assign operand_f_regfile = (CVA6Cfg.NrRgprPorts == 9) ? rdata[5] : 0;  // input word 0 (x28)
+  assign operand_g_regfile = (CVA6Cfg.NrRgprPorts == 9) ? rdata[6] : 0;  // input word 1 (x29)
+  assign operand_h_regfile = (CVA6Cfg.NrRgprPorts == 9) ? rdata[7] : 0;  // input word 2 (x30)
+  assign operand_i_regfile = (CVA6Cfg.NrRgprPorts == 9) ? rdata[8] : 0;  // input word 3 (x31)
 
 
   // ----------------------
@@ -715,7 +741,7 @@ module issue_read_operands
     if (!rst_ni) begin
       operand_a_q           <= '{default: 0};
       operand_b_q           <= '{default: 0};
-      // modification: reset extra operands in pipeline registers
+      // Reset accelerator operand pipeline registers.
       operand_d_q           <= '{default: 0};
       operand_e_q           <= '{default: 0};
       operand_f_q           <= '{default: 0};
@@ -733,7 +759,7 @@ module issue_read_operands
     end else begin
       operand_a_q           <= operand_a_n;
       operand_b_q           <= operand_b_n;
-      // modification: pipeline extra operands to the next stage
+      // Pipeline the additional accelerator operands into the execution stage.
       operand_d_q           <= operand_d_n;
       operand_e_q           <= operand_e_n;
       operand_f_q           <= operand_f_n;
@@ -753,7 +779,7 @@ module issue_read_operands
 
   //pragma translate_off
   initial begin
-    assert (CVA6Cfg.NrRgprPorts == 2 || CVA6Cfg.NrRgprPorts == 3 || CVA6Cfg.NrRgprPorts == 5 || CVA6Cfg.NrRgprPorts == 9) //&& CVA6Cfg.CvxifEn)) // modification: keep supported regfile read port configurations
+    assert (CVA6Cfg.NrRgprPorts == 2 || CVA6Cfg.NrRgprPorts == 3 || CVA6Cfg.NrRgprPorts == 5 || CVA6Cfg.NrRgprPorts == 9) // Supported configurations; final accelerator configuration uses 9 read ports
     else
       $fatal(
           1,

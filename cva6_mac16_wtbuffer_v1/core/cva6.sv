@@ -161,7 +161,9 @@ module cva6
   localparam bit EnableAccelerator = CVA6Cfg.RVV;  // Currently only used by V extension (Ara)
   localparam int unsigned NrWbPorts = (CVA6Cfg.CvxifEn || EnableAccelerator) ? 5 : 4;
 
-  localparam NrRgprPorts = 9;//modification for 9 operand sources (rs1, rs2, rs3, rs4, rs5, rs6, rs7, rs8, rs9) for mac16buf_para instruction
+  // Final MNIST accelerator register-file sizing.
+  // MAC16BUF_PARA reads 4 weight words + rd/bias + 4 input words in one issue.
+  localparam NrRgprPorts = 9;
 
   localparam config_pkg::cva6_cfg_t CVA6ExtendCfg = {
     CVA6Cfg.NrCommitPorts,
