@@ -9,6 +9,7 @@ The final implementation includes:
 - Input buffer
 - Weight buffer
 - Local accumulator
+- Accelated packed Clamp function in coprocessor and pipeline stage with in coprocessor : please ues the file cvxif_example_coprocessor_acc_packed_clamp.sv 
 - CV-X-IF coprocessor integration
 - Modified GNU assembler/toolchain
 - Questa RTL simulation
