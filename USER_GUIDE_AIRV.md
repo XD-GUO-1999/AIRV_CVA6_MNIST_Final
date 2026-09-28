@@ -1520,7 +1520,146 @@ This is what removes repeated CPU-register accumulation traffic.
 
 ---
 
-## 12.12 FPGA Configuration: `cv32a6_ima_sv32_fpga_config_pkg.sv`
+## 12.12 Optional Packing and Pipeline Optimization
+
+The implementation described in Section 12.11 is the main validated accelerator using the input buffer, weight buffer, local accumulator, and hardware post-processing.
+
+An additional optimized version is provided at the project root:
+
+```text
+cvxif_example_coprocessor_acc_packed_clamp.sv
+```
+
+This version keeps the same main accelerator architecture and adds two additional optimizations:
+
+```text
+four-output packing
+partial-sum pipeline register
+```
+
+The original coprocessor is kept unchanged so that the two implementations can be tested and compared independently.
+
+> **Important:** the line numbers below refer to the current `cvxif_example_coprocessor_acc_packed_clamp.sv` source snapshot. If the file is reformatted later, use the symbol / anchor name to locate the corresponding logic.
+
+### Main modified areas
+
+| Current line(s) | Anchor / block | Purpose |
+|---:|---|---|
+| 96–114 | `x_issue_t` | Adds metadata for post-processing, packing, and pipeline execution. |
+| 123–148 | `result_pipe_req_q`, `partial_sum_pipe_q` | Defines the register between MAC16 reduction and Stage 2. |
+| 164–226 | `issue_pack4_en`, `issue_pack_writeback` | Controls four-output packing and packed write-back. |
+| 230–245 | `stage1_fire`, `stage2_fire` | Controls the two pipeline stages. |
+| 411–450 | `sat_shift8_u8()` | Performs hardware ReLU, shift, and 8-bit saturation. |
+| 452–494 | `output_pack_next` | Performs Stage-2 accumulation, post-processing, and packing. |
+| 712–796 | Stage 1 MAC16 datapath | Computes the 16 INT8 products and `partial_sum`. |
+| 798–820 | `result_pipeline_reg` | Registers `partial_sum` together with its request metadata. |
+| 823–845 | CV-X-IF result interface | Returns the Stage-2 result to the CPU. |
+
+### Four-output packing
+
+After hardware post-processing, the Conv1, Conv2, and FC1 outputs are 8-bit values. The optimized version combines four consecutive 8-bit outputs into one 32-bit word:
+
+```text
++--------+--------+--------+--------+
+| out[3] | out[2] | out[1] | out[0] |
++--------+--------+--------+--------+
+   8 bit    8 bit    8 bit    8 bit
+```
+
+The packing position is tracked by `pack_idx`, and the actual packing is performed around lines 471–479.
+
+Normally, four completed outputs are grouped into one packed 32-bit result. The implementation also handles the final incomplete packing group when the number of outputs is not a multiple of four.
+
+Packing is enabled only for outputs that have completed the hardware post-processing path. FC2 keeps the full accumulator result because its final six scalar MAC operations are still performed in software.
+
+### Partial-sum pipeline register
+
+The second optimization inserts a pipeline register after the MAC16 reduction:
+
+```text
+MAC16 multiplication
+        ↓
+MAC16 reduction
+        ↓
+partial_sum
+        ↓
+PIPELINE REGISTER
+        ↓
+local accumulator
+        ↓
+post-processing
+        ↓
+packing
+        ↓
+CV-X-IF result
+```
+
+Stage 1 computes `partial_sum` around lines 712–796. The pipeline register is implemented around lines 798–820.
+
+The main registered signals are:
+
+```systemverilog
+result_pipe_req_q
+partial_sum_pipe_q
+```
+
+The arithmetic result and its corresponding request metadata are registered together:
+
+```text
+req_o       -> result_pipe_req_q
+partial_sum -> partial_sum_pipe_q
+```
+
+Stage 2 then uses `partial_sum_pipe_q` and `result_pipe_req_q` for accumulation, post-processing, packing, and final result generation.
+
+This separates the MAC16 multiplication/reduction from the remaining result path and reduces the length of the combinational critical path.
+
+### Using the optimized version
+
+The normal project uses:
+
+```text
+core/cvxif_example/cvxif_example_coprocessor.sv
+```
+
+To test the optimized version, replace it with the file stored at the project root while keeping the original destination filename:
+
+```bash
+cp cvxif_example_coprocessor_acc_packed_clamp.sv \
+   core/cvxif_example/cvxif_example_coprocessor.sv
+```
+
+The SystemVerilog module name remains:
+
+```systemverilog
+cvxif_example_coprocessor
+```
+
+so no upper-level RTL modification is required.
+
+The resulting optimized datapath is:
+
+```text
+input / weight selection
+        ↓
+MAC16
+        ↓
+PIPELINE REGISTER      <- additional optimization
+        ↓
+local accumulator
+        ↓
+post-processing
+        ↓
+4-OUTPUT PACKING       <- additional optimization
+        ↓
+CV-X-IF result
+```
+
+In the architecture figure, the **PIPELINE REGISTER** and **4-OUTPUT PACKING** blocks can be shown in a different color to distinguish them from the original accelerator architecture.
+
+---
+
+## 12.13 FPGA Configuration: `cv32a6_ima_sv32_fpga_config_pkg.sv`
 
 ### Line 21
 
